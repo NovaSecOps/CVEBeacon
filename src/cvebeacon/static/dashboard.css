@@ -770,6 +770,34 @@ form[data-bulk-ready] .bulk-select-controls { display: flex; }
 .table-dense { font-size: .9rem; }
 .table-dense th, .table-dense td { padding: 10px 12px; }
 .table-dense th { font-size: .75rem; }
+.review-table { table-layout: fixed; }
+.review-table thead th { white-space: normal; }
+.review-table thead th.review-asset-cell { width: 9%; }
+.review-table thead th.review-reason-cell { width: 15%; }
+.review-table thead th.review-detail-cell { width: 33%; }
+.review-table thead th.review-product-cell { width: 13%; }
+.review-table thead th.review-versions-cell { width: 14%; }
+.review-table thead th.review-status-cell { width: 8%; }
+.review-table thead th.review-retry-cell { width: 8%; }
+
+/* Review entries stack as labelled rows on narrow screens, so the table never
+   needs horizontal scrolling. Every cell stays visible, and explicit ARIA roles
+   in the markup keep the table structure when the display rules change. */
+@media (max-width: 640px) {
+  .review-table thead {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .review-table, .review-table tbody, .review-table tr, .review-table td { display: block; width: 100%; }
+  .review-table tr { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+  .review-table tr:last-child { border-bottom: 0; }
+  .review-table td { min-width: 0; padding: var(--space-1) 0; border: 0; }
+  .review-table td::before {
+    content: attr(data-label); display: block; text-align: left;
+    font-size: .72rem; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--text-muted);
+  }
+}
 
 /* Field grid for site forms. One column on narrow screens. */
 .field-grid {

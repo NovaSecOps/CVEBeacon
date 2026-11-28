@@ -614,10 +614,11 @@ def create_web_blueprint(config):
         """The client's report marks; a missing file is FileNotFoundError, a bad one ValueError."""
         return web_reported.parse(read_bytes(web_reported.marks_path(output)), web_assets.client_key, client)
 
-    def render(client="", *, error=None, status=200, prefill_url="", added=0, marked=None,
+    def render(client="", *, page="overview", error=None, status=200, prefill_url="", added=0, marked=None,
                withdrawn=None, sync_notice=None):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
+        reason_counts = []
         last_job, truncated, removed = None, False, False
         site_rows, site_summary = [], {}
         inventory_clients = _inventory_clients(config)
@@ -642,7 +643,7 @@ def create_web_blueprint(config):
                 client = document["client"]
                 try:
                     sync_settings = sync.mode(config, path)
-                    if status == 200 and config.managed_inventory:
+                    if page == "overview" and status == 200 and config.managed_inventory:
                         sync_view = sync.inspect(config, client)
                 except ConfigurationError as exc:
                     sync_warning = str(exc)
@@ -693,6 +694,14 @@ def create_web_blueprint(config):
                         run.setdefault("products_with_version", sum(bool(item.get("versions")) for item in products))
                         run.setdefault("saved_snapshot_generated_at", snapshot["generated_at"] if snapshot else "")
                         run.setdefault("snapshot_updated", False)
+                        if run.get("status") == "failed":
+                            counts = {}
+                            for item in reviews:
+                                reason = item.get("reason")
+                                if reason in _FETCH_FAILURE_REASONS:
+                                    counts[reason] = counts.get(reason, 0) + 1
+                            reason_counts = [(reason, _REASON_LABELS[reason], counts[reason])
+                                             for reason in _REASON_LABELS if reason in counts]
                     products, reviews = products[:1000], reviews[:1000]
                 last_job = next((job for job in manager().store.recent(200)
                                  if job.operation in {"web-detect", "web-plan"}
@@ -827,13 +836,22 @@ def create_web_blueprint(config):
                 run_tone = "warning"
         can_manage = bool(g.accounts and "manage_web_assets" in g.permissions)
         section_primary_action = (
-            "run" if client and document and document["assets"] and g.accounts
-            and "run" in g.permissions and available else "")
+            "run" if page in {"overview", "detection"} and client and document and document["assets"]
+            and g.accounts and "run" in g.permissions and available else "")
         section_primary_url, section_primary_label = "", ""
         if client and can_manage:
             section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
             section_primary_label = "Add site"
-        if client:
+        if section_primary_action:
+            section_primary_label = ("Detect web technologies" if page == "detection" else "Run detection")
+        if page == "sites":
+            section_description = ("Add, change and remove the sites this client has authorised you to check."
+                                   if client else "Record the websites a client has authorised you to check.")
+        elif page == "detection":
+            section_description = (
+                "Run detection, check what the last run saved and review entries that need a person."
+                if client else "Run detection for a client and review saved detection entries.")
+        elif client:
             section_description = (
                 f"{site_count} authorised site{'' if site_count == 1 else 's'}, "
                 f"{len(products)} detected product{'' if len(products) == 1 else 's'}, "
@@ -853,14 +871,14 @@ def create_web_blueprint(config):
                     next_steps.append({
                         "state": "todo", "title": "Run the first detection",
                         "detail": "Detection is manual and has not run for this client.",
-                        "url": url_for("web.index", client=client, _anchor="detection"),
+                        "url": url_for("web.detection", client=client),
                         "action_label": "Run detection"})
                 if reviews:
                     next_steps.append({
                         "state": "attention",
                         "title": f"Review {len(reviews)} detection entr{'y' if len(reviews) == 1 else 'ies'}",
                         "detail": "Saved results include entries that need a person to decide.",
-                        "url": url_for("web.index", client=client, _anchor="detection"),
+                        "url": url_for("web.detection", client=client),
                         "action_label": "Review"})
                 if chips["ready"]:
                     next_steps.append({
@@ -892,11 +910,13 @@ def create_web_blueprint(config):
         has_client_inventory = bool(
             client and config.managed_inventory
             and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file())
-        template = "web_assets.html"
+        template = {"sites": "web_assets_sites.html", "detection": "web_assets_detection.html"}.get(
+            page, "web_assets.html")
         return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
-                               run=run, snapshot=snapshot, available=available, notice=COMPANION_NOTICE,
+                               run=run, reason_counts=reason_counts, snapshot=snapshot,
+                               available=available, notice=COMPANION_NOTICE,
                                last_job=last_job, truncated=truncated, removed=removed, error=error,
                                versions_hidden=versions_hidden, reason_labels=_REASON_LABELS,
                                prefill_entry=prefill_entry, prefill_url=prefill_url, flt=flt, chips=chips,
@@ -916,7 +936,7 @@ def create_web_blueprint(config):
                                sync_notice=sync_notice, sync_waiting=sync.WAITING,
                                added=added, client_key=inventory_client_key(client) if client else "",
                                status_labels=actions.STATUS_LABELS, status_badges=actions.STATUS_BADGES,
-                               site_rows=site_rows, site_count=site_count,
+                               page=page, section_page=page, site_rows=site_rows, site_count=site_count,
                                site_summary=site_summary, tab_counts=tab_counts, show_changes=show_changes,
                                next_steps=next_steps, run_label=run_label, run_badge=run_badge,
                                run_tone=run_tone, last_run_short=last_run_short,
@@ -1049,6 +1069,16 @@ def create_web_blueprint(config):
                 _canonical_client(config, client_label(label),
                                   candidates=_inventory_clients(config, replay=False)) if label else "",
                 prefill_url=prefill_url)
+        except (ConfigurationError, ValueError):
+            abort(400)
+
+    @blueprint.get("/detection")
+    @requires("view")
+    def detection():
+        label = _text(request.args, "client", limit=256)
+        try:
+            return render(_canonical_client(config, client_label(label)) if label else "",
+                          page="detection")
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -1494,9 +1524,9 @@ def create_web_blueprint(config):
             argv = build_command(config, action, client=document["client"])
             job = manager().submit(action, started_by=g.user.username, argv=argv)
         except (RunInProgress, JobQueueFull) as exc:
-            return render(client, error=str(exc), status=409)
+            return render(client, page="detection", error=str(exc), status=409)
         except (CVEBeaconError, ValueError, OSError) as exc:
-            return render(client, error=str(exc) if isinstance(exc, ConfigurationError)
+            return render(client, page="detection", error=str(exc) if isinstance(exc, ConfigurationError)
                           else "The web detection job could not be started", status=400)
         return redirect(url_for("operations.job_detail", job_id=job.id), code=303)
 

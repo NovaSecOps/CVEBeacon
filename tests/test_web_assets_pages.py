@@ -35,13 +35,16 @@ def test_overview_and_sites_render_for_view_only_and_manage_users(web):
     assert save(client).status_code == 303
     grant(users, {"view"})
     login(client, "reader")
-    for path in ("/web-assets?client=Acme", "/web-assets/sites?client=Acme"):
+    for path in ("/web-assets?client=Acme", "/web-assets/sites?client=Acme",
+                 "/web-assets/detection?client=Acme"):
         page = client.get(path)
         assert page.status_code == 200, page.text
     site_page = client.get("/web-assets/sites?client=Acme").text
     assert 'name="hostname"' not in site_page
     assert "Remove this site" not in site_page
     assert 'name="csv_file"' not in site_page
+    detection_page = client.get("/web-assets/detection?client=Acme").text
+    assert 'value="web-detect"' not in detection_page and 'value="web-plan"' not in detection_page
 
     users.save_role("web-editor", {"view", "manage_web_assets"}, authorization=users.authenticate("admin", PASSWORD))
     users.edit_user("reader", role="web-editor", disabled=False,
@@ -54,6 +57,7 @@ def test_overview_and_sites_render_for_view_only_and_manage_users(web):
     assert 'name="hostname"' not in overview
     assert 'name="csv_file"' not in overview
     assert "Remove all assets" not in overview
+    assert client.get("/web-assets/detection?client=Acme").status_code == 200
 
 
 def test_section_tabs_mark_exactly_one_current_page(web):
@@ -68,6 +72,11 @@ def test_section_tabs_mark_exactly_one_current_page(web):
     assert sites.count('aria-current="page"') == 1
     assert re.search(r'<a href="/web-assets/sites\?client=Acme"[^>]*aria-current="page">Sites', sites)
     assert 'role="tablist"' not in sites
+
+    detection = tab_markup(client.get("/web-assets/detection?client=Acme").text)
+    assert detection.count('aria-current="page"') == 1
+    assert re.search(r'<a href="/web-assets/detection\?client=Acme"[^>]*aria-current="page">Detection', detection)
+    assert 'role="tablist"' not in detection
 
 
 def test_changes_tab_and_summary_only_when_inventory_sync_is_on(web):
@@ -163,10 +172,24 @@ def test_sites_without_a_client_shows_the_chooser_not_an_error(web):
     assert client.get("/web-assets/sites", query_string={"client": ""}).status_code == 200
 
 
-def test_overview_and_sites_have_no_inline_script_or_style_and_load_bulk_script(web):
+def test_client_chooser_opens_the_page_it_is_on(web):
     _, _, _, client = web
     assert save(client).status_code == 303
-    for path in ("/web-assets?client=Acme", "/web-assets/sites?client=Acme"):
+    for page, destination in (("/web-assets", "/web-assets"),
+                              ("/web-assets/sites", "/web-assets/sites"),
+                              ("/web-assets/detection", "/web-assets/detection")):
+        response = client.get(page)
+        assert response.status_code == 200
+        chooser = response.text.split("Choose a client", 1)[1].split("</section>", 1)[0]
+        assert f'action="{destination}"' in chooser
+        assert f'<a href="{destination}?client=Acme">Acme</a>' in chooser
+
+
+def test_web_assets_pages_have_no_inline_script_or_style_and_load_bulk_script(web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    for path in ("/web-assets?client=Acme", "/web-assets/sites?client=Acme",
+                 "/web-assets/detection?client=Acme"):
         text = client.get(path).text
         assert not re.search(r"(?i)\sstyle\s*=", text)
         assert not re.search(r"(?is)<style\b", text)
@@ -239,6 +262,7 @@ def test_shared_section_components_are_styled():
     assert not re.search(r"\.filters label\s*\{", css)
     assert re.search(r"\.section-tabs\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;", css, re.S)
     assert ".section-tabs a:focus-visible" in css
+    assert ".review-table td:empty" not in css
     assert re.search(r"details\.danger-zone\s*\{[^}]*border-color:\s*var\(--danger-border\)", css, re.S)
     assert re.search(r"details\.danger-zone > summary\s*\{[^}]*color:\s*var\(--danger-text\)", css, re.S)
     assert re.search(r"details\.site-item > summary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto", css, re.S)
@@ -253,10 +277,14 @@ def test_web_assets_is_a_separate_sidebar_section(web):
     assert '<p class="nav-heading">Web assets</p>' in sidebar
     assert '<a href="/web-assets"' in sidebar
     assert '<a href="/web-assets/sites"' in sidebar
+    assert '<a href="/web-assets/detection"' in sidebar
     assert '<a href="/web-assets" aria-current="page">' in sidebar
     sites_sidebar = client.get("/web-assets/sites?client=Acme").text.split(
         '<nav class="sidebar"', 1)[1].split("</nav>", 1)[0]
     assert '<a href="/web-assets/sites" aria-current="page">' in sites_sidebar
+    detection_sidebar = client.get("/web-assets/detection?client=Acme").text.split(
+        '<nav class="sidebar"', 1)[1].split("</nav>", 1)[0]
+    assert '<a href="/web-assets/detection" aria-current="page">' in detection_sidebar
     clients_group = sidebar.split('<p class="nav-heading">Clients</p>', 1)[1].split("</div>", 1)[0]
     assert "/web-assets" not in clients_group
 
@@ -267,6 +295,170 @@ def test_overview_alias_and_sites_reject_invalid_clients(web):
     assert client.get("/web-assets/sites", query_string={"client": "x" * 200}).status_code == 400
     assert client.get("/web-assets/sites", query_string={
         "client": "Acme", "prefill_url": "not a URL"}).status_code == 400
+    assert client.get("/web-assets/detection", query_string={"client": "x" * 200}).status_code == 400
+
+
+def seed_detection(config, *, run=None, reviews=()):
+    _, output = paths(config, "Acme")
+    detail = {"client": "Acme", "products": [], "reviews": list(reviews)}
+    if run is not None:
+        detail["run"] = run
+    web_assets.replace_bytes(Path(str(output) + ".review.json"),
+                             json.dumps(detail).encode("utf-8"))
+
+
+def review_table(page):
+    start = '<table class="table-dense review-table" role="table">'
+    assert start in page
+    return page.split(start, 1)[1].split("</table>", 1)[0]
+
+
+RUN = {
+    "status": "success", "started_at": "2026-11-27T09:15:00Z",
+    "ended_at": "2026-11-27T09:16:39Z", "duration_seconds": 99.0,
+    "request_count": 21, "asset_count": 1, "fetched_count": 1,
+    "products_recognized": 0, "products_with_version": 0,
+    "saved_snapshot_generated_at": "2026-11-27T09:15:00+00:00",
+    "snapshot_updated": False,
+}
+
+
+def test_detection_page_owns_run_controls_summary_and_reviews(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run=RUN, reviews=[{
+        "asset_id": "web-example", "reason": "version-unknown", "detail": "fixed safe detail"}])
+    overview = client.get("/web-assets?client=Acme").text
+    assert overview.count('value="web-detect"') == 1
+    assert 'value="web-plan"' not in overview and "Check the saved sites" not in overview
+    assert "Entries to review" not in overview and "Run details" not in overview
+    assert 'id="detection"' in overview
+    assert 'href="/web-assets/detection?client=Acme"' in overview
+    assert "Review 1 detection entry" in overview
+
+    detection = client.get("/web-assets/detection?client=Acme").text
+    assert 'value="web-detect"' in detection and 'value="web-plan"' in detection
+    assert 'action="/web-assets/run"' in detection
+    assert "Latest run" in detection and "Last checked" in detection
+    assert "Sites fetched" in detection and "21" in detection
+    assert "Entries to review" in detection
+    assert "1 entry needs review." in detection
+    assert "Version not disclosed" in detection
+    assert '<span class="muted">version-unknown</span>' in detection
+    assert 'class="table-dense review-table"' in detection
+    assert 'data-label="Reason"' in detection
+
+
+def test_detection_controls_follow_run_permission(web):
+    _, users, _, client = web
+    assert save(client).status_code == 303
+    grant(users, {"view"})
+    login(client, "reader")
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert 'value="web-detect"' not in page and 'value="web-plan"' not in page
+    assert "Detection is read-only for your account." in page
+
+    users.save_role("web-editor", {"view", "manage_web_assets"},
+                    authorization=users.authenticate("admin", PASSWORD))
+    login(client)
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert 'value="web-detect"' not in page and 'value="web-plan"' not in page
+
+    users.save_role("web-editor", {"view", "run"},
+                    authorization=users.authenticate("admin", PASSWORD))
+    login(client)
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert page.count('value="web-detect"') == 2 and page.count('value="web-plan"') == 1
+
+
+def test_review_table_keeps_seven_cells_and_header_associations(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run=RUN, reviews=[
+        {"asset_id": "web-example", "reason": "blocked", "detail": "fixed safe detail",
+         "status": 429, "retry_after": 120},
+        {"asset_id": "web-other", "reason": "version-unknown", "detail": ""},
+    ])
+    page = client.get("/web-assets/detection?client=Acme").text
+    table = review_table(page)
+    assert table.count('role="columnheader"') == 7
+    assert table.count('role="rowgroup"') == 2
+    assert table.count('role="row"') == 3
+    assert table.count('role="cell"') == 14
+    assert table.count("<td") == 14
+    headers = re.findall(
+        r'<th id="([^"]+)"[^>]*scope="col" role="columnheader">([^<]+)</th>', table)
+    assert [label for _, label in headers] == [
+        "Asset", "Reason", "Detail", "Product", "Conflicting versions",
+        "HTTP status", "Retry after (seconds)"]
+    for row in re.findall(r'<tr role="row">(.*?)</tr>', table, re.S)[1:]:
+        assert re.findall(r'headers="([^"]+)"', row) == [item[0] for item in headers]
+    assert ('<td role="cell" headers="review-status" data-label="HTTP status">429</td>'
+            in table)
+    assert ('<td role="cell" headers="review-retry" data-label="Retry after (seconds)"'
+            ' class="num">120</td>' in table)
+    assert '<td role="cell" headers="review-product" data-label="Product">—</td>' in table
+    assert ('<td role="cell" headers="review-versions"'
+            ' data-label="Conflicting versions">—</td>' in table)
+    assert '<td role="cell" headers="review-detail" data-label="Detail">—</td>' in table
+
+
+def test_failed_run_callout_counts_fetch_failure_reasons_before_the_display_cap(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    reviews = [{"asset_id": f"web-{index}", "reason": "no-technologies",
+                "detail": "ordinary detail"} for index in range(1000)]
+    reviews += [
+        {"asset_id": "web-blocked-a", "reason": "blocked", "detail": "private raw detail"},
+        {"asset_id": "web-blocked-b", "reason": "blocked"},
+        {"asset_id": "web-timeout", "reason": "timeout"},
+    ]
+    seed_detection(config, run={**RUN, "status": "failed", "fetched_count": 0},
+                   reviews=reviews)
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert '<span class="badge badge-danger">Failed</span>' in page
+    callout = page.split('class="callout callout-danger"', 1)[1].split("</div></div>", 1)[0]
+    assert "Request blocked: 2" in callout
+    assert "Request timed out: 1" in callout
+    assert "private raw detail" not in callout
+    assert "example.invalid" not in callout
+
+
+def test_failed_run_without_saved_reasons_says_counts_are_unavailable(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run={**RUN, "status": "failed"}, reviews=[
+        {"asset_id": "web-example", "reason": "version-unknown"}])
+    page = client.get("/web-assets/detection?client=Acme").text
+    callout = page.split('class="callout callout-danger"', 1)[1].split("</div></div>", 1)[0]
+    assert "Reason counts are unavailable." in callout
+
+
+def test_detection_page_without_sites_offers_the_sites_page(web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    assert save(client, action="remove", index="0").status_code == 303
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert "Add a site before running detection" in page
+    assert 'value="web-detect"' not in page
+    assert 'href="/web-assets/sites?client=Acme#add-asset"' in page
+
+
+def test_detection_without_a_client_or_with_a_bad_client(web):
+    _, _, _, client = web
+    page = client.get("/web-assets/detection")
+    assert page.status_code == 200 and "Choose a client" in page.text
+    assert client.get("/web-assets/detection", query_string={"client": ""}).status_code == 200
+
+
+def test_legacy_detection_anchor_keeps_a_summary_that_links_to_detection(web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    page = client.get("/web-assets?client=Acme").text
+    assert 'id="detection"' in page
+    summary = page.split('id="detection"', 1)[1].split("</section>", 1)[0]
+    assert 'href="/web-assets/detection?client=Acme"' in summary
+    assert "Detection details" in summary or "Open Detection" in summary
 
 
 def test_sites_get_does_not_create_web_storage(web):

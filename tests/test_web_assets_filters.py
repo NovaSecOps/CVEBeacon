@@ -31,7 +31,7 @@ def seed(web, products):
 def results(client, **query):
     page = client.get("/web-assets", query_string={"client": "Acme", **query})
     assert page.status_code == 200, page.text
-    return page.text.split("Filter results", 1)[1].split("Entries to review", 1)[0]
+    return page.text.split("Filter results", 1)[1].split("</main>", 1)[0]
 
 
 SAMPLE = [
@@ -131,7 +131,7 @@ def test_markup_has_no_inline_code_and_disclosures_are_closed(web):
         assert not re.search(r"(?i)\sstyle\s*=", text)
         assert not re.search(r"(?is)<style\b", text)
         assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)[^>]*>", text)
-        assert not re.search(r"<details[^>]*\bopen", text.split("Filter results", 1)[1].split("Entries to review", 1)[0])
+        assert not re.search(r"<details[^>]*\bopen", text.split("Filter results", 1)[1].split("</main>", 1)[0])
 
 
 def test_explicit_inventory_status_and_older_files(web):
