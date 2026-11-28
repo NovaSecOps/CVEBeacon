@@ -14,7 +14,13 @@ from typing import Iterator, Sequence
 
 from .errors import StateError
 from .identity import validate_client_name
-from .models import Finding, QueryResult, HealthStatus
+from .models import Applicability, Finding, QueryResult, HealthStatus
+from .optional_sources import (
+    CVEDB_FIELDS,
+    CVEDB_ONLY_REASON,
+    OPTIONAL_SOURCES,
+    VULNCHECK_FIELDS,
+)
 from .watch.directories import ensure_private_directory
 
 SCHEMA_VERSION = 3
@@ -256,6 +262,7 @@ class StateStore:
                 degraded = any(
                     health.status in {HealthStatus.FAILED, HealthStatus.DEGRADED}
                     for result in results for health in result.source_health
+                    if health.source not in OPTIONAL_SOURCES
                 )
                 status = "failed" if inventory_incomplete or coverage_warnings or degraded else "completed"
                 db.execute(
@@ -353,6 +360,35 @@ class StateStore:
                         if previous and core_incomplete and not finding.vulnerability.rejected:
                             # Retain the last observation rather than turn a failed
                             # applicability refresh into a resolution or new baseline.
+                            # Optional fields and evidence are not authoritative, so
+                            # replace only those in the current row with this scan's
+                            # view; an empty result clears them.
+                            retained = json.loads(previous["payload_json"])
+                            current = json.loads(payload)
+                            retained_vulnerability = retained.get("vulnerability")
+                            current_vulnerability = current.get("vulnerability", {})
+                            if isinstance(retained_vulnerability, dict):
+                                for field in (*VULNCHECK_FIELDS, *CVEDB_FIELDS):
+                                    value = current_vulnerability.get(field)
+                                    if value is None:
+                                        retained_vulnerability.pop(field, None)
+                                    else:
+                                        retained_vulnerability[field] = value
+                            retained["evidence"] = [
+                                item for item in retained.get("evidence", ())
+                                if not (isinstance(item, dict) and item.get("source") in OPTIONAL_SOURCES)
+                            ] + [
+                                item for item in current.get("evidence", ())
+                                if isinstance(item, dict) and item.get("source") in OPTIONAL_SOURCES
+                            ]
+                            db.execute(
+                                "UPDATE current_findings SET payload_json=? WHERE asset_id=? AND cve_id=?",
+                                (
+                                    json.dumps(retained, sort_keys=True, ensure_ascii=False),
+                                    finding.asset.asset_id,
+                                    primary,
+                                ),
+                            )
                             continue
                         if previous and failed_sources.intersection({"cisa_kev", "eu_kev", "epss"}):
                             old = json.loads(previous["payload_json"])
@@ -442,7 +478,7 @@ class StateStore:
                        (_timestamp(), "completed" if successful else "failed",
                         "Scan and configured deliveries completed" if successful else "Scan failed, coverage was incomplete, or delivery failed; inspect scanner logs", identifier))
 
-    def dashboard_snapshot(self) -> dict:
+    def dashboard_snapshot(self, *, include_cvedb_only: bool = True) -> dict:
         """Read one consistent view without changing findings, events or delivery state."""
         self.initialize()
         with closing(self._connect()) as db:
@@ -450,6 +486,18 @@ class StateStore:
             def one(sql):
                 row = db.execute(sql).fetchone()
                 return dict(row) if row else None
+            events_sql = "SELECT event_id,occurred_at,asset_id,cve_id,event_type FROM events"
+            events_values: tuple[str, ...] = ()
+            if not include_cvedb_only:
+                # Filter on each event's own payload before the recent-events
+                # cap is charged, so hidden CVEDB-only events cannot displace
+                # core changes.
+                events_sql += (
+                    " WHERE NOT (COALESCE(json_extract(payload_json, '$.reason'), '') = ?"
+                    " AND COALESCE(json_extract(payload_json, '$.applicability'), '') = ?)"
+                )
+                events_values = (CVEDB_ONLY_REASON, Applicability.NEEDS_REVIEW.value)
+            events_sql += " ORDER BY event_id DESC LIMIT 20"
             latest = one("SELECT * FROM runs ORDER BY completed_at DESC LIMIT 1")
             run_id = latest["run_id"] if latest else ""
             snapshot = {
@@ -460,7 +508,7 @@ class StateStore:
                              for row in db.execute("SELECT * FROM current_findings f WHERE NOT EXISTS (SELECT 1 FROM advisory_aliases a WHERE a.asset_id=f.asset_id AND a.alias=f.cve_id AND a.primary_id!=f.cve_id) ORDER BY asset_id,cve_id")],
                 "assets": [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM scan_assets WHERE run_id=?", (run_id,))],
                 "health": [dict(row) for row in db.execute("SELECT asset_id,source,status,checked_at,message,freshness_at FROM source_health WHERE run_id=? ORDER BY asset_id,source", (run_id,))],
-                "events": [dict(row) for row in db.execute("SELECT event_id,occurred_at,asset_id,cve_id,event_type FROM events ORDER BY event_id DESC LIMIT 20")],
+                "events": [dict(row) for row in db.execute(events_sql, events_values)],
                 "deliveries": [dict(row) for row in db.execute("SELECT d.event_id,d.channel,d.state,d.attempts,d.updated_at,e.asset_id,e.cve_id FROM deliveries d JOIN events e ON e.event_id=d.event_id ORDER BY d.updated_at DESC LIMIT 20")],
                 "delivery_counts": [dict(row) for row in db.execute("SELECT channel,state,COUNT(*) AS count FROM deliveries GROUP BY channel,state")],
             }

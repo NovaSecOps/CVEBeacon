@@ -229,7 +229,7 @@ def _parser() -> argparse.ArgumentParser:
 def _notify_pending(config: AppConfig, store: StateStore, http: HttpClient, channel: str) -> int:
     rows = store.pending_events(channel)
     if not rows: return 0
-    items = alert_items(rows)
+    items = alert_items(rows, vulncheck=config.vulncheck_active())
     ids = [item.event_id for item in items]
     try:
         if channel == "teams":
@@ -994,6 +994,16 @@ def _live_source_checks(
             operations.append(("eu_kev", kev.eu))
         if wanted("epss", config.sources.epss_enabled):
             operations.append(("epss", lambda: EPSSSource(http).scores([target])))
+        if wanted("vulncheck", config.sources.vulncheck_enabled):
+            token = config.vulncheck_api_key()
+            if token:
+                from .sources.vulncheck import VulnCheckSource
+                operations.append(("vulncheck", lambda: VulnCheckSource(http).kev(token)))
+            else:
+                checks["vulncheck"] = "skipped: no token"
+        if wanted("shodan_cvedb", config.sources.shodan_cvedb_enabled):
+            from .sources.shodan_cvedb import fetch_cve
+            operations.append(("shodan_cvedb", lambda: fetch_cve(http, target)))
         for name, operation in operations:
             try:
                 operation()
@@ -1614,7 +1624,11 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
                     print("Report not written because a client inventory is unreadable.", file=sys.stderr)
                 else:
                     path = _report_path(config, args.report)
-                    (write_xlsx if args.report == "xlsx" else write_json)(results, path)
+                    (write_xlsx if args.report == "xlsx" else write_json)(
+                        results, path,
+                        vulncheck=config.vulncheck_active(),
+                        cvedb=config.cvedb_active(),
+                    )
                     print(path)
             warnings = sum(result.coverage is not None for result in results)
             degraded = any(health.status in {HealthStatus.DEGRADED, HealthStatus.FAILED} for result in results for health in result.source_health)
@@ -1626,12 +1640,15 @@ def _run_configured(args, config: AppConfig, store: StateStore, *, attempt_id=No
         path = Path(args.output).resolve() if args.output else _report_path(config, args.format)
         if path in {inventory_config.path, config.config_path, config.database_path} or path.is_relative_to(config.inventory_directory):
             raise CVEBeaconError("report output cannot overwrite inventory, configuration or state")
-        (write_xlsx if args.format == "xlsx" else write_json)(results, path); print(path); return 0
+        (write_xlsx if args.format == "xlsx" else write_json)(
+            results, path, vulncheck=config.vulncheck_active(),
+            cvedb=config.cvedb_active(),
+        ); print(path); return 0
     if args.command == "history":
         print(json.dumps(store.history(asset_id=args.asset_id, cve_id=args.cve_id, limit=args.limit), indent=2)); return 0
     if args.command == "notify":
         sample = [{"event_id": 0, "asset_id": "test-asset", "cve_id": "CVE-2099-9999", "event_type": "test", "payload_json": json.dumps({"applicability": "needs_review", "vulnerability": {"cvss_score": None, "cisa_kev": False, "eu_kev": False}})}]
-        items = alert_items(sample)
+        items = alert_items(sample, vulncheck=config.vulncheck_active())
         channels = configured_channels(config) if args.channel == "all" else (args.channel,)
         if not channels: raise CVEBeaconError("no notification channels are enabled")
         with HttpClient(config.http) as http:

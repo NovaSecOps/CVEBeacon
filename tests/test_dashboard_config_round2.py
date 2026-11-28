@@ -582,8 +582,11 @@ def test_admin_file_secret_help_mentions_content_replacement(accounts):
     login(client, "admin")
     page = client.get("/config/sources")
     assert page.status_code == 200
-    assert "Replace the contents of the existing owner-only file" in page.text
-    assert "A new owner-only file is staged" not in page.text
+    nvd_field = page.text.split('id="control-g0_nvd_api_key_file"', 1)[1].split("</div>", 1)[0]
+    assert "Replace the contents of the existing owner-only file" in nvd_field
+    assert "A new owner-only file is staged" not in nvd_field
+    vulncheck_field = page.text.split('id="control-g0_vulncheck_api_key_file"', 1)[1].split("</div>", 1)[0]
+    assert "A new owner-only file is staged" in vulncheck_field
 
 
 def test_external_deleted_channel_secret_is_administrator_responsibility(accounts):

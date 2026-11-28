@@ -61,6 +61,13 @@
 
 {% call card('Before you change anything', 'Leave a field empty to use the default. Lists use square brackets, for example ["email"].') %}
 <p>A short note under each field explains it.</p>
+{% if section == 'sources' %}
+{% call callout('info', 'Current source state') %}
+<p>VulnCheck KEV: <strong>{{ source_states.vulncheck }}</strong>. {% if source_states.vulncheck == 'off: no token' %}VulnCheck needs an API token; get a free community token at vulncheck.com and set it here or in {{ source_states.vulncheck_env }}.{% elif source_states.vulncheck == 'off: disabled' %}VulnCheck is disabled in this configuration.{% else %}VulnCheck KEV is on.{% endif %}</p>
+<p>Shodan CVE database: <strong>{{ source_states.shodan_cvedb }}</strong>. Sends product CPE identifiers and CVE IDs to cvedb.shodan.io. No client names, hostnames or IP addresses.</p>
+<p>Check Shodan's and VulnCheck's terms of use for your use case.</p>
+{% endcall %}
+{% endif %}
 <p>All settings are checked before you can confirm them. Monitoring and scan settings apply from the next run.</p>
 {% if section == 'notifications' %}{% call callout('info', 'Scan-report notifications') %}<p><strong>Scan-report notifications (legacy).</strong> They send scan findings by email or chat. Watch alerts use separate <a href="{{ url_for('config_editor.channels') }}">watch alert channels</a>.</p>{% endcall %}{% call explain('Technical details') %}<p>These settings use the <code>[notifications.teams]</code> and <code>[notifications.email]</code> tables in the configuration file. Secret values are read from environment variables.</p>{% endcall %}{% endif %}
 {% if section == 'channels' %}{% call callout('info', 'Watch alert settings') %}<p><strong>Watch alert channels.</strong> They decide where watch alerts go. Scan reports use the older <a href="{{ url_for('config_editor.notifications') }}">scan-report notifications</a>.</p>{% endcall %}{% call explain('Technical details') %}<p>Watch alert channels use <code>[watch.channels.*]</code> tables in the configuration file. Scan-report notifications use <code>[notifications.teams]</code> and <code>[notifications.email]</code>; their secret values are read from environment variables.</p>{% endcall %}{% endif %}

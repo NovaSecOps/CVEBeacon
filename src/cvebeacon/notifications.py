@@ -25,9 +25,10 @@ class AlertItem:
     category: str = ""
     system_id: str = ""
     ecosystem: str = ""
+    vulncheck_kev: bool = False
 
 
-def alert_items(rows: Iterable[Mapping[str, Any]]) -> list[AlertItem]:
+def alert_items(rows: Iterable[Mapping[str, Any]], *, vulncheck: bool = False) -> list[AlertItem]:
     output = []
     for row in rows:
         payload = json.loads(str(row["payload_json"]))
@@ -36,6 +37,7 @@ def alert_items(rows: Iterable[Mapping[str, Any]]) -> list[AlertItem]:
             int(row["event_id"]), str(row["asset_id"]), str(row["cve_id"]), str(row["event_type"]),
             str(payload["applicability"]), vuln.get("cvss_score"), bool(vuln.get("cisa_kev")), bool(vuln.get("eu_kev")),
             *(str(payload.get("asset", {}).get(key, "")) for key in ("category", "system_id", "ecosystem")),
+            vulncheck_kev=bool(vuln.get("vulncheck_kev")) if vulncheck else False,
         ))
     return output
 
@@ -47,6 +49,7 @@ def render_text(items: Iterable[AlertItem], *, max_items: int = 100) -> str:
         priority = []
         if item.cisa_kev: priority.append("CISA KEV")
         if item.eu_kev: priority.append("EU KEV")
+        if item.vulncheck_kev: priority.append("VulnCheck KEV")
         score = f" CVSS {item.cvss_score:g}" if item.cvss_score is not None else ""
         suffix = f" [{', '.join(priority)}]" if priority else ""
         labels = ", ".join(f"{key}={getattr(item, key)}" for key in ("category", "system_id", "ecosystem") if getattr(item, key))

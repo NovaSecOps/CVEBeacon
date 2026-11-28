@@ -16,6 +16,7 @@ from openpyxl.utils import get_column_letter
 
 from .models import Applicability, QueryResult
 from .errors import ReportingError
+from .optional_sources import filter_result_payload, source_visible
 from .xlsx_safety import neutralize_formula
 
 
@@ -45,14 +46,23 @@ def _excel_datetime(value):
     return value
 
 
-def write_json(results: Iterable[QueryResult], path: str | Path) -> Path:
+def _visible(result: dict, *, vulncheck: bool, cvedb: bool) -> dict:
+    return filter_result_payload(result, vulncheck=vulncheck, cvedb=cvedb)
+
+
+def write_json(results: Iterable[QueryResult], path: str | Path, *,
+               vulncheck: bool = False, cvedb: bool = False) -> Path:
+    values = [
+        _visible(item.to_dict(), vulncheck=vulncheck, cvedb=cvedb)
+        for item in results
+    ]
     destination = Path(path)
     temporary = None
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=destination.parent, suffix=".json", delete=False) as handle:
             temporary = Path(handle.name)
-            json.dump([item.to_dict() for item in results], handle, indent=2, ensure_ascii=False)
+            json.dump(values, handle, indent=2, ensure_ascii=False)
         os.replace(temporary, destination)
     except (OSError, TypeError, ValueError) as exc:
         if temporary:
@@ -100,7 +110,8 @@ def write_xlsx_tables(stream, metadata, tables):
     workbook.save(stream)
 
 
-def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
+def write_xlsx(results: Iterable[QueryResult], path: str | Path, *,
+               vulncheck: bool = False, cvedb: bool = False) -> Path:
     values = list(results)
     destination = Path(path)
     try:
@@ -120,19 +131,48 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
             result.asset.category, result.asset.system_id, result.asset.ecosystem,
         ]])
     findings = workbook.create_sheet("Findings")
-    findings.append(["Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability", "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile", "EPSS Date", "CISA KEV", "EU KEV", "Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"])
+    headers = [
+        "Asset ID", "Vendor", "Product", "Version", "Advisory", "Applicability",
+        "Confidence", "Reason", "CVSS", "CVSS Vector", "EPSS", "EPSS Percentile",
+        "EPSS Date", "CISA KEV", "EU KEV",
+    ]
+    if vulncheck:
+        headers += [
+            "VulnCheck KEV", "VulnCheck Date Added", "VulnCheck Ransomware",
+            "VulnCheck Reported Exploits", "VulnCheck Exploit References",
+        ]
+    if cvedb:
+        headers += ["Shodan CVEDB KEV", "Shodan CVEDB Ransomware"]
+    headers += ["Rejected", "Published", "Modified", "Summary", "Sources", "Conflicts"]
+    findings.append(headers)
     for result in values:
         for item in result.findings:
             vuln = item.vulnerability
-            findings.append([_safe(_one_line(value)) for value in [
+            row = [
                 item.asset.asset_id, item.asset.vendor, item.asset.product, item.asset.version,
                 vuln.primary_id, item.applicability.value, item.confidence, item.reason,
                 vuln.cvss_score, vuln.cvss_vector, vuln.epss_score, vuln.epss_percentile,
                 vuln.epss_date.isoformat() if vuln.epss_date else None,
-                vuln.cisa_kev, vuln.eu_kev, vuln.rejected, vuln.published, vuln.modified,
-                vuln.summary, ", ".join(sorted({x.source for x in item.evidence})),
+                vuln.cisa_kev, vuln.eu_kev,
+            ]
+            if vulncheck:
+                row += [
+                    vuln.vulncheck_kev, vuln.vulncheck_date_added,
+                    vuln.vulncheck_ransomware, vuln.vulncheck_reported_exploits,
+                    vuln.vulncheck_exploit_references,
+                ]
+            if cvedb:
+                row += [vuln.shodan_cvedb_kev, vuln.shodan_cvedb_ransomware]
+            row += [
+                vuln.rejected, vuln.published, vuln.modified,
+                vuln.summary,
+                ", ".join(sorted({
+                    x.source for x in item.evidence
+                    if source_visible(x.source, vulncheck=vulncheck, cvedb=cvedb)
+                })),
                 "; ".join(item.conflicts),
-            ]])
+            ]
+            findings.append([_safe(_one_line(value)) for value in row])
     uncertainty = workbook.create_sheet("Uncertainty")
     uncertainty.append(["Asset ID", "Advisory", "State", "Reason", "Source Health"])
     for result in values:
@@ -146,6 +186,8 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
     for result in values:
         for item in result.findings:
             for evidence in item.evidence:
+                if not source_visible(evidence.source, vulncheck=vulncheck, cvedb=cvedb):
+                    continue
                 evidence_sheet.append([_safe(_one_line(value)) for value in [
                     item.asset.asset_id, item.vulnerability.primary_id, evidence.source, evidence.role,
                     evidence.statement, evidence.source_timestamp, _excel_datetime(evidence.retrieved_at),
@@ -160,6 +202,8 @@ def write_xlsx(results: Iterable[QueryResult], path: str | Path) -> Path:
     health_sheet.append(["Asset ID", "Source", "Status", "Checked At", "Freshness At", "Message"])
     for result in values:
         for health in result.source_health:
+            if not source_visible(health.source, vulncheck=vulncheck, cvedb=cvedb):
+                continue
             health_sheet.append([_safe(_one_line(value)) for value in [
                 result.asset.asset_id, health.source, health.status.value, _excel_datetime(health.checked_at),
                 _excel_datetime(health.freshness_at), health.message,

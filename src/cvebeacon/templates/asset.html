@@ -30,7 +30,7 @@
 {% endcall %}
 </div>
 {% call card('Findings for this asset', 'Vulnerabilities recorded against this asset. Open a row for the assessment and any evidence that was recorded.') %}
-{% if rows %}{{ findings_table(rows) }}{% else %}{{ empty_state('No findings recorded for this asset', 'No vulnerability was matched to this asset, or the scan has not checked it yet. This is not proof of complete vulnerability coverage; review coverage and source status above.') }}{% endif %}
+{% if rows %}{{ findings_table(rows, data.vulncheck_on) }}{% else %}{{ empty_state('No findings recorded for this asset', 'No vulnerability was matched to this asset, or the scan has not checked it yet. This is not proof of complete vulnerability coverage; review coverage and source status above.') }}{% endif %}
 {% endcall %}
 <details class="disclosure"><summary>Technical details</summary>
 <dl>

@@ -84,6 +84,13 @@ An optional `client` column labels the client that owns an asset. The value unde
 
 Source controls, retry/timeouts, output paths, optional exact CPE mappings, and notification settings are illustrated in the example configuration. A configured product CPE must be a complete CPE 2.3 name with a wildcard version; verify it against NVD before use.
 
+Two optional sources extend exploitation and discovery evidence:
+
+- **VulnCheck KEV** is enabled by default but stays off until a token is set. Get a free community token at [vulncheck.com](https://vulncheck.com/) and set `VULNCHECK_API_TOKEN`, another environment variable named by `vulncheck_api_key_env`, or an owner-only file named by `vulncheck_api_key_file`. Without a token, Settings and the Sources view report `off: no token`; scans record no VulnCheck row and continue normally. The token is never displayed, logged, exported, written to state or retained from a response. The token file follows the same backup rule as the NVD key file: excluded by default and copied only when secret inclusion is selected.
+- **Shodan CVEDB** is free and needs no key, but is disabled by default. When explicitly enabled it sends product CPE identifiers and CVE IDs to `cvedb.shodan.io`; no client names, hostnames or IP addresses are sent. It adds corroborating evidence and, for a CVE only it reports, a `needs_review` finding with the reason `reported by Shodan CVEDB only; confirm applicability`. It never changes an NVD or OSV applicability decision and is capped at 500 CVE lookups and 500 discovery results per run.
+
+Settings shows each source as `on`, `off: no token` or `off: disabled`. Check Shodan's and VulnCheck's terms of use for your use case. See [vulnerability data sources](SOURCES.md) for endpoints, fields and limits.
+
 ## 4. Inventory formats and mapping
 
 The file extension selects XLSX, CSV, JSON, or YAML when `format = "auto"`. A different supported format can be named explicitly.
@@ -238,7 +245,7 @@ SemVer and Python version ranges use their respective ordering rules. Generic pr
 
 ## 9. Material changes
 
-Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, or a comparable remediation-relevant claim. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
+Notifications are created for a new finding or a meaningful change to applicability, affected evidence, rejection/withdrawal state, CVSS, CISA KEV membership, EU KEV membership, or a comparable remediation-relevant claim. VulnCheck KEV is evidence and a badge only; enabling it does not create a material change. Upstream modification timestamps and ordinary EPSS movement are stored when available but do not independently trigger alerts.
 
 Any change in the selected CVSS score/vector/version is material. When sources provide different scores, the highest reported base score and its associated vector/version are displayed together; the conflict and original metrics remain in the evidence. Reordering equivalent evidence does not create an alert. Schema 3 preserves legacy fingerprints and alias-only changes do not produce an upgrade alert storm. Changed source claims still produce material events.
 
@@ -248,9 +255,9 @@ Watch alerts, initial digests, `watch events` output, webhook documents and stat
 
 Source health is recorded per asset and source. For generic product targets, an NVD failure degrades discovery coverage while independent evidence remains available. For exact packages, OSV is required and NVD/CVE/EUVD are optional enrichment; an enrichment outage does not invalidate native applicability. If EPSS fails, applicability can remain valid while the score is unavailable. KEV outages degrade prioritization enrichment. Notification channels do not depend on one another.
 
-Empty independent product searches and disabled core sources leave coverage unconfirmed. KEV membership is `null` when unavailable, `false` when a healthy catalogue does not list the CVE, and `true` when listed. None of these values implies absence of exploitation outside that catalogue. Reports are fresh query results; they do not contain notification delivery state. Inspect SQLite deliveries for channel acceptance details.
+Empty independent product searches and disabled core sources leave coverage unconfirmed. KEV membership is `null` when unavailable, `false` when a healthy catalogue does not list the CVE, and `true` when listed. VulnCheck KEV is unavailable without a token; that state is `off: no token`, not a source failure. A Shodan CVEDB lookup cap or truncated discovery result is degraded health for that source only. None of these values implies absence of exploitation outside that catalogue. Reports are fresh query results; they do not contain notification delivery state. Inspect SQLite deliveries for channel acceptance details.
 
-An incomplete core refresh retains prior stored findings rather than marking them resolved. Failed KEV refreshes retain previous membership and its original evidence timestamps in monitoring state. Missing findings are never automatically resolved or deleted. Previously observed CVEs for the same product/version are refreshed even if discovery no longer returns them, allowing rejected records to produce material events. Source health must be read alongside stored findings. There is no persistent offline source cache; retained findings are historical observations, not fresh source responses.
+An incomplete core refresh retains prior stored findings rather than marking them resolved. Failed CISA KEV and EU KEV refreshes retain previous membership and its original evidence timestamps in monitoring state. Missing findings are never automatically resolved or deleted. Previously observed CVEs for the same product/version are refreshed even if discovery no longer returns them, allowing rejected records to produce material events. Source health must be read alongside stored findings. There is no persistent offline source cache; retained findings are historical observations, not fresh source responses.
 
 Validate local configuration and state access:
 

@@ -69,6 +69,12 @@ inclusion only when the backup location is at least as protected as the live
 secret directory, and remember to protect and dispose of those copies with the
 same care as the originals.
 
+API key files named by `sources.nvd_api_key_file` and
+`sources.vulncheck_api_key_file` follow the same rule: excluded from a default
+backup and copied under `secrets/` only when secret inclusion is selected.
+Configuration backups and rollback diffs contain only the file references, not
+the token or key contents.
+
 Included secret files are restored with the databases. A secret path that is no
 longer configured and is outside the data directory is refused rather than
 written.

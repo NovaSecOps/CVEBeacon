@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import replace
 from typing import Iterable
 
+from . import optional_sources
 from .applicability import (Decision, VERSION_UNKNOWN_REASON, evaluate_cve_evidence, evaluate_nvd_evidence,
                             exact_cpe_version, identity_text, known_version, wildcard_cpe_version)
 from .config import AppConfig
@@ -289,6 +290,8 @@ class QueryEngine:
         self._known_package_ids = defaultdict(set)
         self._known_package_aliases = defaultdict(list)
         for item in known_findings:
+            if optional_sources.is_cvedb_only(item):
+                continue
             previous_asset = Asset(**item["asset"])
             if previous_asset.identity_path in {"purl", "ecosystem", "commit"}:
                 self._known_package_ids[previous_asset.target_key].update(item["vulnerability"].get("source_ids", ()))
@@ -300,11 +303,20 @@ class QueryEngine:
                 self._known_targets[previous_asset.target_key].add(item["vulnerability"]["cve_id"])
         package_assets = {asset.target_key: asset for asset in assets if asset.identity_path in {"purl", "ecosystem", "commit"} and not identity_conflict(asset)}
         self._osv_results = self.osv.query_many(list(package_assets.values())) if package_assets and self.config.sources.osv_enabled else {}
+        config = getattr(self, "config", None)
+        optional_context = None
+        if config is not None and (
+            optional_sources.vulncheck_active(config)
+            or optional_sources.cvedb_active(config)
+        ):
+            optional_context = optional_sources.new_context(self)
         cached: dict[tuple[str, str, str], QueryResult] = {}
         output: list[QueryResult] = []
         for asset in assets:
             if asset.target_key not in cached:
-                cached[asset.target_key] = self.query_asset(asset)
+                cached[asset.target_key] = optional_sources.apply(
+                    self, asset, self.query_asset(asset), optional_context
+                )
             shared = cached[asset.target_key]
             output.append(QueryResult(
                 asset,

@@ -42,6 +42,12 @@ euvd_enabled = true
 cisa_kev_enabled = true
 eu_kev_enabled = true
 epss_enabled = true
+# VulnCheck KEV is off until an API token is set.
+vulncheck_enabled = true
+vulncheck_api_key_env = "VULNCHECK_API_TOKEN"
+# vulncheck_api_key_file = "secrets/vulncheck-api-token"
+# Shodan CVEDB is a keyless CVE database; it sends only CPE names and CVE IDs.
+shodan_cvedb_enabled = false
 nvd_api_key_env = "NVD_API_KEY"
 # nvd_api_key_file = "secrets/nvd-api-key"
 minimum_request_interval = 6

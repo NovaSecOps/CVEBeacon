@@ -18,3 +18,5 @@ euvd_enabled = false
 cisa_kev_enabled = false
 eu_kev_enabled = false
 epss_enabled = false
+vulncheck_enabled = false
+shodan_cvedb_enabled = false

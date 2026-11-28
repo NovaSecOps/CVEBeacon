@@ -240,7 +240,9 @@ COMPLEX_FIELDS = {"sources", "channels", "events", "cvss_providers", "condition"
 _SESSION_SAFE_TABLES = {
     "watch": {"enabled", "sources", "initial", "backfill_days", "overlap_minutes", "language"},
     "sources": {"osv_enabled", "nvd_enabled", "cve_enabled", "euvd_enabled", "cisa_kev_enabled",
-                "eu_kev_enabled", "epss_enabled", "nvd_api_key_env", "nvd_api_key_file", "minimum_request_interval"},
+                "eu_kev_enabled", "epss_enabled", "vulncheck_enabled", "vulncheck_api_key_env",
+                "vulncheck_api_key_file", "shodan_cvedb_enabled", "nvd_api_key_env",
+                "nvd_api_key_file", "minimum_request_interval"},
     "inventory": {"path", "format", "worksheet", "header_row", "records_path", "delimiter", "encoding", "web_snapshots", "managed"},
     "web": {"inventory_sync", "removal_grace_days", "inventory_auto_remove"},
     "http": {"connect_timeout", "read_timeout", "retries", "backoff_seconds", "user_agent"},
@@ -696,6 +698,8 @@ def effective_environment(document, path):
         return value.strip()
     if path == ("sources", "nvd_api_key_env"):
         return defaults(SourceConfig)["nvd_api_key_env"]
+    if path == ("sources", "vulncheck_api_key_env"):
+        return defaults(SourceConfig)["vulncheck_api_key_env"]
     return None
 
 
@@ -705,6 +709,8 @@ def effective_environment_row(row, key, prefix):
         return value.strip()
     if prefix == ("sources",) and key == "nvd_api_key_env":
         return defaults(SourceConfig)["nvd_api_key_env"]
+    if prefix == ("sources",) and key == "vulncheck_api_key_env":
+        return defaults(SourceConfig)["vulncheck_api_key_env"]
     return None
 
 
@@ -714,6 +720,20 @@ def environment_precedence(name):
     except (TypeError, ValueError):
         return False
     return bool(value and value.strip())
+
+
+def source_effective_states(config):
+    """The configured state shown in Settings; never includes a secret value."""
+    sources = config.sources
+    return {
+        "vulncheck": (
+            "on" if sources.vulncheck_enabled and config.vulncheck_api_key()
+            else "off: no token" if sources.vulncheck_enabled
+            else "off: disabled"
+        ),
+        "vulncheck_env": sources.vulncheck_api_key_env,
+        "shodan_cvedb": "on" if sources.shodan_cvedb_enabled else "off: disabled",
+    }
 
 
 def generated_file_paths(config, current_config):
@@ -738,6 +758,8 @@ def _config_reference_paths(configs):
     for config in configs:
         if config.sources is not None and config.sources.nvd_api_key_file is not None:
             result.add(config.sources.nvd_api_key_file.resolve())
+        if config.sources is not None and config.sources.vulncheck_api_key_file is not None:
+            result.add(config.sources.vulncheck_api_key_file.resolve())
         for channel in config.watch.channels:
             for key in CREDENTIAL_FIELDS.get(channel.type, ()):
                 if not key.endswith("_file"):
@@ -1673,6 +1695,8 @@ def effective_reference_path(config, reference):
     """Resolve a raw TOML reference position through the loader's config."""
     if reference == ("sources", "nvd_api_key_file"):
         return config.sources.nvd_api_key_file
+    if reference == ("sources", "vulncheck_api_key_file"):
+        return config.sources.vulncheck_api_key_file
     if (len(reference) >= 4 and reference[0] == "watch"
             and reference[1] == "channels" and reference[-1].endswith("_file")):
         channel = next((item for item in config.watch.channels
@@ -1690,6 +1714,10 @@ def credential_identities(config):
         ("source", "nvd_api_key"): (
             "source", config.sources.nvd_api_key_env,
             config.sources.nvd_api_key_file,
+        ),
+        ("source", "vulncheck_api_key"): (
+            "source", config.sources.vulncheck_api_key_env,
+            config.sources.vulncheck_api_key_file,
         ),
         ("notifications", "teams"): config.teams,
         ("notifications", "email"): config.email,
@@ -1798,6 +1826,7 @@ def _channel_owner_replaced(candidate_info, baseline_info, name):
 
 DEFAULT_REFERENCES = {
     ("sources", "nvd_api_key_env"): defaults(SourceConfig)["nvd_api_key_env"],
+    ("sources", "vulncheck_api_key_env"): defaults(SourceConfig)["vulncheck_api_key_env"],
     ("dashboard", "password_hash_env"): defaults(DashboardConfig)["password_hash_env"],
     ("notifications", "teams", "webhook_env"): defaults(TeamsConfig)["webhook_env"],
     ("notifications", "email", "tenant_id_env"): defaults(EmailConfig)["tenant_id_env"],
@@ -1835,6 +1864,7 @@ def _raw_reference_map(document, base):
 def _config_reference_map(config):
     values = dict(DEFAULT_REFERENCES)
     values[("sources", "nvd_api_key_env")] = config.sources.nvd_api_key_env
+    values[("sources", "vulncheck_api_key_env")] = config.sources.vulncheck_api_key_env
     values[("dashboard", "password_hash_env")] = config.dashboard.password_hash_env
     values[("notifications", "teams", "webhook_env")] = config.teams.webhook_env
     values[("notifications", "email", "tenant_id_env")] = config.email.tenant_id_env
@@ -1842,6 +1872,8 @@ def _config_reference_map(config):
     values[("notifications", "email", "client_secret_env")] = config.email.client_secret_env
     if config.sources.nvd_api_key_file is not None:
         values[("sources", "nvd_api_key_file")] = str(config.sources.nvd_api_key_file)
+    if config.sources.vulncheck_api_key_file is not None:
+        values[("sources", "vulncheck_api_key_file")] = str(config.sources.vulncheck_api_key_file)
     for channel in config.watch.channels:
         for key in CREDENTIAL_FIELDS.get(channel.type, ()):
             if not key.endswith("_file"):
@@ -1917,6 +1949,8 @@ def effective_paths(config):
         values[("inventory",)] = config.inventory.path
     if config.sources.nvd_api_key_file is not None:
         values[("source", "nvd_api_key_file")] = config.sources.nvd_api_key_file
+    if config.sources.vulncheck_api_key_file is not None:
+        values[("source", "vulncheck_api_key_file")] = config.sources.vulncheck_api_key_file
     for channel in config.watch.channels:
         for key in CREDENTIAL_FIELDS.get(channel.type, ()):
             if not key.endswith("_file"):
@@ -2867,6 +2901,7 @@ def register_config(app, config, *, host):
                                        leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA,
                                        channel_names=[channel.name for channel in current_config.watch.channels],
                                        toml_value=value, saved=request.args.get("saved") == "1",
+                                       source_states=source_effective_states(current_config),
                                        read_only=editor.read_only() or rules_over_limit)
         except FieldValidationError as exc:
             error = str(exc)
@@ -2906,6 +2941,7 @@ def register_config(app, config, *, host):
                                    leaves=LEAF_KEYS, condition_schema=CONDITION_SCHEMA, toml_value=value,
                                    match=match, channel_types=sorted(TYPE_KEYS),
                                    channel_names=[channel.name for channel in current_config.watch.channels],
+                                   source_states=source_effective_states(current_config),
                                    read_only=editor.read_only() or rules_over_limit), status
         return render_template("config_error.html", error=error,
                                read_only=editor.read_only()), status

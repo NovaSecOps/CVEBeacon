@@ -28,7 +28,7 @@ TECHNOLOGY_COLUMNS = (
 SUMMARY_COLUMNS = (
     ("window_count", "CVEs in window"), ("current_count", "Total current CVEs"),
     ("severity", "Highest severity"), ("max_cvss", "Max CVSS"), ("cisa_kev", "CISA KEV"),
-    ("eu_kev", "EU KEV"), ("exploitation", "Exploitation"), ("max_epss", "Max EPSS (%)"),
+    ("eu_kev", "EU KEV"), ("vulncheck_kev", "VulnCheck KEV"), ("exploitation", "Exploitation"), ("max_epss", "Max EPSS (%)"),
     ("newest_published", "Newest published"), ("first_found", "First found"),
 )
 CVE_COLUMNS = (
@@ -36,6 +36,7 @@ CVE_COLUMNS = (
     ("applicability", "Applicability"), ("severity", "Severity"), ("cvss_score", "CVSS"),
     ("cvss_version", "CVSS version"), ("epss_score", "EPSS (%)"),
     ("epss_percentile", "EPSS percentile (%)"), ("cisa_kev", "CISA KEV"), ("eu_kev", "EU KEV"),
+    ("vulncheck_kev", "VulnCheck KEV"), ("vulncheck_date_added", "VulnCheck date added"),
     ("exploitation", "Exploitation"), ("exploitation_sources", "Exploitation sources"),
     ("published", "Published"), ("modified", "Last modified"), ("first_seen", "First found"),
     ("last_seen", "Last seen"), ("fixed_versions", "Fixed versions"), ("references", "References"),
@@ -67,16 +68,23 @@ def _headers(columns):
     return tuple(label for _, label in columns)
 
 
-def _cve_rows(report, *, include_empty=False):
+def _columns(columns, vulncheck):
+    if vulncheck:
+        return columns
+    hidden = {"vulncheck_kev", "vulncheck_date_added"}
+    return tuple(column for column in columns if column[0] not in hidden)
+
+
+def _cve_rows(report, columns, *, include_empty=False):
     for row in report["technologies"]:
         technology = tuple(_cells(row, TECHNOLOGY_COLUMNS))
         if include_empty and row["window_count"] == 0 and report["filters"]["show_empty"]:
-            yield (*technology, *(None for _ in CVE_COLUMNS))
+            yield (*technology, *(None for _ in columns))
         for cve in row["cves"]:
-            yield (*technology, *_cells(cve, CVE_COLUMNS))
+            yield (*technology, *_cells(cve, columns))
 
 
-def _xlsx(report):
+def _xlsx(report, vulncheck):
     payload = BytesIO()
     window = report["window"]
     dates = f"{window['from']} to {window['to']} UTC" if window["from"] else "All time"
@@ -89,20 +97,22 @@ def _xlsx(report):
         metadata.append(("CVE details", "Capped at 50,000 CVE rows"))
     if report["notices"]:
         metadata.append(("Notices", " ".join(report["notices"])))
-    columns = TECHNOLOGY_COLUMNS + SUMMARY_COLUMNS + (("coverage", "Findings coverage"),)
+    columns = TECHNOLOGY_COLUMNS + _columns(SUMMARY_COLUMNS, vulncheck) + (("coverage", "Findings coverage"),)
+    cve_columns = _columns(CVE_COLUMNS, vulncheck)
     write_xlsx_tables(payload, metadata, (
         ("Technologies", _headers(columns), (_cells(row, columns) for row in report["technologies"])),
-        ("CVEs", _headers(TECHNOLOGY_COLUMNS + CVE_COLUMNS), _cve_rows(report)),
+        ("CVEs", _headers(TECHNOLOGY_COLUMNS + cve_columns), _cve_rows(report, cve_columns)),
     ))
     payload.seek(0)
     return payload
 
 
-def _csv(report):
+def _csv(report, vulncheck):
     output = StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
-    writer.writerow(_headers(TECHNOLOGY_COLUMNS + CVE_COLUMNS))
-    for row in _cve_rows(report, include_empty=True):
+    cve_columns = _columns(CVE_COLUMNS, vulncheck)
+    writer.writerow(_headers(TECHNOLOGY_COLUMNS + cve_columns))
+    for row in _cve_rows(report, cve_columns, include_empty=True):
         writer.writerow(neutralize_formula(value) for value in row)
     return BytesIO(output.getvalue().encode("utf-8"))
 
@@ -181,7 +191,7 @@ def create_blueprint(config):
         printable = request.args.get("print") == "1"
         return render_template(
             "tech_report.html", report=result, export_args=args, windows=windows, fields=FIELDS,
-            printable=printable,
+            printable=printable, vulncheck_on=config.vulncheck_active(),
             severities=[("any", "Any severity"), *((level, level.title()) for level in SEVERITIES[2:])],
             confidence_choices=CONFIDENCE_CHOICES,
             status_labels=STATUS_LABELS, status_badges=STATUS_BADGES, exploitation=EXPLOITATION,
@@ -195,7 +205,12 @@ def create_blueprint(config):
         if kind not in MIMETYPES:
             abort(400)
         result = report(export=True)
-        payload = {"csv": _csv, "json": _json, "xlsx": _xlsx}[kind](result)
+        vulncheck = config.vulncheck_active()
+        payload = {
+            "csv": lambda value: _csv(value, vulncheck),
+            "json": _json,
+            "xlsx": lambda value: _xlsx(value, vulncheck),
+        }[kind](result)
         response = send_file(payload, as_attachment=True, download_name=_download_name(result, kind),
                              mimetype=MIMETYPES[kind])
         if result["cves_capped"] or result["findings_capped"]:
