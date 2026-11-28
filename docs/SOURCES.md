@@ -203,8 +203,9 @@ its failure is degraded coverage and cannot hold NVD/EUVD initialization open.
   scan material fingerprint, so enabling the source never creates a material
   change by itself. CISA KEV remains the alerting known-exploitation source.
   Absence from this list is not evidence that a flaw is not exploited; only a
-  complete successful load can mark a CVE as not in VulnCheck KEV. A failed or
-  degraded refresh keeps the previously saved evidence.
+  complete successful load can mark a CVE as not in VulnCheck KEV. A failed
+  catalog refresh leaves membership unknown and clears VulnCheck evidence for
+  refreshed findings.
 - Limitations: response fields are validated against the documented shapes.
   Confirm plan limits against your VulnCheck API documentation.
 
@@ -243,9 +244,10 @@ Check VulnCheck's terms of use for your use case.
   built from CVEDB data alone: no official CVE List, NVD, EUVD, FIRST EPSS or
   catalog lookup is made for them, and their failures affect only CVEDB health.
   A prior CVEDB-only finding is not carried into the next scan as an
-  authoritative discovery. A failed or degraded refresh keeps previously saved
-  evidence; an inactive source adds no metadata or evidence and its optional
-  fields are hidden from rendered output.
+  authoritative discovery. Refreshed findings use CVEDB metadata and evidence
+  from the current scan; successful lookups still supply evidence when CVEDB
+  health is degraded. An inactive source adds no metadata or evidence and its
+  optional fields are hidden from rendered output.
 - Limitations: a missing CVEDB record is not proof that a product is
   unaffected. Shodan describes keyless CVEDB access as free for non-commercial
   use; check both providers' terms of use for your use case.
