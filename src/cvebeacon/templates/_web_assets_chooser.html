@@ -1,13 +1,13 @@
 {% from 'ui.html' import card, empty_state, button %}
-{% macro client_chooser() %}
+{% macro client_chooser(endpoint='web.index') %}
 {% call card('Choose a client', 'Open an existing inventory client or type a new name to start recording authorised sites.') %}
-<form class="filters" method="get" action="{{ url_for('web.index') }}">
+<form class="filters" method="get" action="{{ url_for(endpoint) }}">
 <div class="field"><label for="web-client">Client name</label><input id="web-client" name="client" value="" list="inventory-client-names" required maxlength="256"><datalist id="inventory-client-names">{% for name in inventory_clients %}<option value="{{ name }}">{% endfor %}</datalist><p class="help">Choose an existing inventory client or enter a new name.</p></div>
 <div class="form-actions">{{ button('Open client') }}</div>
 </form>
 {% if clients %}
 <p class="help">Saved clients</p>
-<ul class="client-switcher-list">{% for name in clients %}<li><a href="{{ url_for('web.index', client=name) }}">{{ name }}</a></li>{% endfor %}</ul>
+<ul class="client-switcher-list">{% for name in clients %}<li><a href="{{ url_for(endpoint, client=name) }}">{{ name }}</a></li>{% endfor %}</ul>
 {% endif %}
 {% endcall %}
 {% if not clients %}

@@ -169,6 +169,19 @@ def test_sites_without_a_client_shows_the_chooser_not_an_error(web):
     assert client.get("/web-assets/sites", query_string={"client": ""}).status_code == 200
 
 
+def test_client_chooser_opens_the_page_it_is_on(web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    for page, destination in (("/web-assets", "/web-assets"),
+                              ("/web-assets/sites", "/web-assets/sites"),
+                              ("/web-assets/detection", "/web-assets/detection")):
+        response = client.get(page)
+        assert response.status_code == 200
+        chooser = response.text.split("Choose a client", 1)[1].split("</section>", 1)[0]
+        assert f'action="{destination}"' in chooser
+        assert f'<a href="{destination}?client=Acme">Acme</a>' in chooser
+
+
 def test_web_assets_pages_have_no_inline_script_or_style_and_load_bulk_script(web):
     _, _, _, client = web
     assert save(client).status_code == 303
@@ -229,6 +242,7 @@ def test_shared_section_components_are_styled():
     assert not re.search(r"\.filters label\s*\{", css)
     assert re.search(r"\.section-tabs\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;", css, re.S)
     assert ".section-tabs a:focus-visible" in css
+    assert ".review-table td:empty" not in css
     assert re.search(r"details\.danger-zone\s*\{[^}]*border-color:\s*var\(--danger-border\)", css, re.S)
     assert re.search(r"details\.danger-zone > summary\s*\{[^}]*color:\s*var\(--danger-text\)", css, re.S)
     assert re.search(r"details\.site-item > summary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto", css, re.S)
@@ -271,6 +285,12 @@ def seed_detection(config, *, run=None, reviews=()):
         detail["run"] = run
     web_assets.replace_bytes(Path(str(output) + ".review.json"),
                              json.dumps(detail).encode("utf-8"))
+
+
+def review_table(page):
+    start = '<table class="table-dense review-table" role="table">'
+    assert start in page
+    return page.split(start, 1)[1].split("</table>", 1)[0]
 
 
 RUN = {
@@ -329,6 +349,69 @@ def test_detection_controls_follow_run_permission(web):
     login(client)
     page = client.get("/web-assets/detection?client=Acme").text
     assert page.count('value="web-detect"') == 2 and page.count('value="web-plan"') == 1
+
+
+def test_review_table_keeps_seven_cells_and_header_associations(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run=RUN, reviews=[
+        {"asset_id": "web-example", "reason": "blocked", "detail": "fixed safe detail",
+         "status": 429, "retry_after": 120},
+        {"asset_id": "web-other", "reason": "version-unknown", "detail": ""},
+    ])
+    page = client.get("/web-assets/detection?client=Acme").text
+    table = review_table(page)
+    assert table.count('role="columnheader"') == 7
+    assert table.count('role="rowgroup"') == 2
+    assert table.count('role="row"') == 3
+    assert table.count('role="cell"') == 14
+    assert table.count("<td") == 14
+    headers = re.findall(
+        r'<th id="([^"]+)"[^>]*scope="col" role="columnheader">([^<]+)</th>', table)
+    assert [label for _, label in headers] == [
+        "Asset", "Reason", "Detail", "Product", "Conflicting versions",
+        "HTTP status", "Retry after (seconds)"]
+    for row in re.findall(r'<tr role="row">(.*?)</tr>', table, re.S)[1:]:
+        assert re.findall(r'headers="([^"]+)"', row) == [item[0] for item in headers]
+    assert ('<td role="cell" headers="review-status" data-label="HTTP status">429</td>'
+            in table)
+    assert ('<td role="cell" headers="review-retry" data-label="Retry after (seconds)"'
+            ' class="num">120</td>' in table)
+    assert '<td role="cell" headers="review-product" data-label="Product">—</td>' in table
+    assert ('<td role="cell" headers="review-versions"'
+            ' data-label="Conflicting versions">—</td>' in table)
+    assert '<td role="cell" headers="review-detail" data-label="Detail">—</td>' in table
+
+
+def test_failed_run_callout_counts_fetch_failure_reasons_before_the_display_cap(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    reviews = [{"asset_id": f"web-{index}", "reason": "no-technologies",
+                "detail": "ordinary detail"} for index in range(1000)]
+    reviews += [
+        {"asset_id": "web-blocked-a", "reason": "blocked", "detail": "private raw detail"},
+        {"asset_id": "web-blocked-b", "reason": "blocked"},
+        {"asset_id": "web-timeout", "reason": "timeout"},
+    ]
+    seed_detection(config, run={**RUN, "status": "failed", "fetched_count": 0},
+                   reviews=reviews)
+    page = client.get("/web-assets/detection?client=Acme").text
+    assert '<span class="badge badge-danger">Failed</span>' in page
+    callout = page.split('class="callout callout-danger"', 1)[1].split("</div></div>", 1)[0]
+    assert "Request blocked: 2" in callout
+    assert "Request timed out: 1" in callout
+    assert "private raw detail" not in callout
+    assert "example.invalid" not in callout
+
+
+def test_failed_run_without_saved_reasons_says_counts_are_unavailable(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_detection(config, run={**RUN, "status": "failed"}, reviews=[
+        {"asset_id": "web-example", "reason": "version-unknown"}])
+    page = client.get("/web-assets/detection?client=Acme").text
+    callout = page.split('class="callout callout-danger"', 1)[1].split("</div></div>", 1)[0]
+    assert "Reason counts are unavailable." in callout
 
 
 def test_detection_page_without_sites_offers_the_sites_page(web):

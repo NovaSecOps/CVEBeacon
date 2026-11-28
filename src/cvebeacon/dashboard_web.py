@@ -616,6 +616,7 @@ def create_web_blueprint(config):
                withdrawn=None, sync_notice=None):
         clients, document, version = [], None, "new"
         products, reviews, run, snapshot, snapshot_rows = [], [], None, None, []
+        reason_counts = []
         last_job, truncated, removed = None, False, False
         site_rows, site_summary = [], {}
         inventory_clients = _inventory_clients(config)
@@ -691,6 +692,14 @@ def create_web_blueprint(config):
                         run.setdefault("products_with_version", sum(bool(item.get("versions")) for item in products))
                         run.setdefault("saved_snapshot_generated_at", snapshot["generated_at"] if snapshot else "")
                         run.setdefault("snapshot_updated", False)
+                        if run.get("status") == "failed":
+                            counts = {}
+                            for item in reviews:
+                                reason = item.get("reason")
+                                if reason in _FETCH_FAILURE_REASONS:
+                                    counts[reason] = counts.get(reason, 0) + 1
+                            reason_counts = [(reason, _REASON_LABELS[reason], counts[reason])
+                                             for reason in _REASON_LABELS if reason in counts]
                     products, reviews = products[:1000], reviews[:1000]
                 last_job = next((job for job in manager().store.recent(200)
                                  if job.operation in {"web-detect", "web-plan"}
@@ -904,7 +913,8 @@ def create_web_blueprint(config):
         return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
-                               run=run, snapshot=snapshot, available=available, notice=COMPANION_NOTICE,
+                               run=run, reason_counts=reason_counts, snapshot=snapshot,
+                               available=available, notice=COMPANION_NOTICE,
                                last_job=last_job, truncated=truncated, removed=removed, error=error,
                                versions_hidden=versions_hidden, reason_labels=_REASON_LABELS,
                                prefill_entry=prefill_entry, prefill_url=prefill_url, flt=flt, chips=chips,

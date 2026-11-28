@@ -3,6 +3,7 @@
 {% block title %}Detection · Web assets · CVEBeacon{% endblock %}
 {% from 'ui.html' import card, callout, table_wrap, empty_state, stat_grid, stat %}
 {% from '_web_assets_chooser.html' import client_chooser with context %}
+{% macro review_cell(value) %}{{ value if value is not none and value != '' else '—' }}{% endmacro %}
 {% set section = {'page': 'detection', 'endpoint': 'web.detection', 'description': section_description,
                   'primary_action': section_primary_action, 'primary_url': section_primary_url,
                   'primary_label': section_primary_label} %}
@@ -10,7 +11,7 @@
 {% include '_web_assets_section.html' %}
 
 {% if not client %}
-{{ client_chooser() }}
+{{ client_chooser('web.detection') }}
 {% elif document %}
 {% call card('Run detection', 'Preview the requests first, or run detection now. Detection contacts only the saved sites. A plan sends nothing.') %}
 {% if not document.assets %}
@@ -35,6 +36,16 @@
 {% set version_count = run.get('products_with_version', 0) %}
 {% set seconds = run.get('duration_seconds') %}
 <p><span class="badge badge-{{ run_badge }}">{{ run_label }}</span> · Last checked {{ watch_stamp(run.get('started_at', '')) }}{% if seconds is number %} · {{ '%.1f' | format(seconds) }} seconds{% endif %}</p>
+{% if run.get('status') == 'failed' %}
+{% call callout('danger', 'Run failed') %}
+{% if reason_counts %}
+<p>Saved fetch failures by reason:</p>
+<ul>{% for reason, label, count in reason_counts %}<li>{{ label }}: {{ count }}</li>{% endfor %}</ul>
+{% else %}
+<p>Reason counts are unavailable.</p>
+{% endif %}
+{% endcall %}
+{% endif %}
 {% call stat_grid() %}
 {{ stat(fetched_count ~ '/' ~ run_site_count, 'Sites fetched') }}
 {{ stat(product_count, 'Products') }}
@@ -61,8 +72,8 @@
 {% if reviews %}
 <p class="summary-line">{{ reviews | length }} entr{{ 'y needs' if reviews | length == 1 else 'ies need' }} review.</p>
 {% call table_wrap('Web detection entries to review') %}
-<table class="table-dense review-table"><thead><tr><th class="review-asset-cell" scope="col">Asset</th><th class="review-reason-cell" scope="col">Reason</th><th class="review-detail-cell" scope="col">Detail</th><th class="review-product-cell" scope="col">Product</th><th class="review-versions-cell" scope="col">Conflicting versions</th><th class="review-status-cell" scope="col">Status</th><th class="review-retry-cell" scope="col">Retry after</th></tr></thead><tbody>
-{% for item in reviews %}<tr><td data-label="Asset">{{ item.get('asset_id', '') }}</td><td data-label="Reason">{{ reason_labels.get(item.get('reason', ''), 'Needs review') }}{% if item.get('reason') %}<br><span class="muted">{{ item.get('reason') }}</span>{% endif %}</td><td data-label="Detail">{{ item.get('detail', '') }}{% if item.get('redirect_display') %}<p>This site redirects to {{ item.get('redirect_display') }}, which is not on the authorised list.{% if accounts and 'manage_web_assets' in permissions %} If the client authorises it, add it as a site.{% endif %}</p>{% if accounts and 'manage_web_assets' in permissions %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.sites', client=client, prefill_url=item.get('redirect_url'), _anchor='add-asset') }}">Add this redirect target as an authorised site</a>{% endif %}{% endif %}</td><td data-label="Product">{{ item.get('product', '') }}</td><td data-label="Conflicting versions">{{ item.get('versions', []) | join(', ') }}</td><td data-label="HTTP status">{{ item.get('status', '') }}</td><td data-label="Retry after (seconds)" class="num">{{ item.get('retry_after', '') }}</td></tr>{% endfor %}</tbody></table>
+<table class="table-dense review-table" role="table"><thead role="rowgroup"><tr role="row"><th id="review-asset" class="review-asset-cell" scope="col" role="columnheader">Asset</th><th id="review-reason" class="review-reason-cell" scope="col" role="columnheader">Reason</th><th id="review-detail" class="review-detail-cell" scope="col" role="columnheader">Detail</th><th id="review-product" class="review-product-cell" scope="col" role="columnheader">Product</th><th id="review-versions" class="review-versions-cell" scope="col" role="columnheader">Conflicting versions</th><th id="review-status" class="review-status-cell" scope="col" role="columnheader">HTTP status</th><th id="review-retry" class="review-retry-cell" scope="col" role="columnheader">Retry after (seconds)</th></tr></thead><tbody role="rowgroup">
+{% for item in reviews %}<tr role="row"><td role="cell" headers="review-asset" data-label="Asset">{{ review_cell(item.get('asset_id', '')) }}</td><td role="cell" headers="review-reason" data-label="Reason">{{ reason_labels.get(item.get('reason', ''), 'Needs review') }}{% if item.get('reason') %}<br><span class="muted">{{ item.get('reason') }}</span>{% endif %}</td><td role="cell" headers="review-detail" data-label="Detail">{% if item.get('detail') %}{{ item.get('detail') }}{% elif not item.get('redirect_display') %}—{% endif %}{% if item.get('redirect_display') %}<p>This site redirects to {{ item.get('redirect_display') }}, which is not on the authorised list.{% if accounts and 'manage_web_assets' in permissions %} If the client authorises it, add it as a site.{% endif %}</p>{% if accounts and 'manage_web_assets' in permissions %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.sites', client=client, prefill_url=item.get('redirect_url'), _anchor='add-asset') }}">Add this redirect target as an authorised site</a>{% endif %}{% endif %}</td><td role="cell" headers="review-product" data-label="Product">{{ review_cell(item.get('product', '')) }}</td><td role="cell" headers="review-versions" data-label="Conflicting versions">{{ review_cell(item.get('versions', []) | join(', ')) }}</td><td role="cell" headers="review-status" data-label="HTTP status">{{ review_cell(item.get('status', '')) }}</td><td role="cell" headers="review-retry" data-label="Retry after (seconds)" class="num">{{ review_cell(item.get('retry_after', '')) }}</td></tr>{% endfor %}</tbody></table>
 {% endcall %}
 {% else %}
 {{ empty_state('No entries need review', 'No saved detection entry needs a person to decide. This does not prove complete coverage of the saved sites; results are hints for review.') }}

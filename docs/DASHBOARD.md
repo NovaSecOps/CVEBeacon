@@ -260,7 +260,9 @@ whether saved results came from that run or an earlier run, with the snapshot
 time. A run that
 fetched sites but found no usable inventory versions succeeds and keeps the
 previous snapshot. A run where every site failed to fetch remains failed; its
-message gives the failed-site count and reason codes without naming a host.
+message gives the failed-site count, and a danger callout groups the saved
+fetch-failure reasons with their counts, without naming a host. When no reason
+was saved, the callout says the reason counts are unavailable.
 When versions are hidden, the page explains where to review those products.
 When resource counts are present, it also says how many script and style files
 were read from the sites and how many were skipped. Products without a version

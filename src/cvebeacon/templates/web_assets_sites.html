@@ -29,7 +29,7 @@
 {% include '_web_assets_section.html' %}
 
 {% if not client %}
-{{ client_chooser() }}
+{{ client_chooser('web.sites') }}
 {% elif document %}
 {% set plural = '' if site_count == 1 else 's' %}
 {% set expiry_text = (site_summary.expired ~ ' expired') if site_summary.expired else ((site_summary.soon ~ (' expires' if site_summary.soon == 1 else ' expire') ~ ' within 30 days') if site_summary.soon else 'no expiries') %}

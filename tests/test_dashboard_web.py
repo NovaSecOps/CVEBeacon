@@ -217,6 +217,30 @@ def test_scan_lock_blocks_jobs_and_edits(web, monkeypatch):
         lock.release()
 
 
+@pytest.mark.parametrize("action", ["web-plan", "web-detect"])
+@pytest.mark.parametrize("failure,status", [("run-in-progress", 409), ("os-error", 400)])
+def test_rejected_run_posts_render_the_detection_error_page(web, monkeypatch, action, failure, status):
+    _, _, app, client = web
+    assert save(client).status_code == 303
+    manager = app.extensions["dashboard_jobs"]
+
+    def submit(*args, **kwargs):
+        if failure == "run-in-progress":
+            raise RunInProgress("holder")
+        raise OSError("failure")
+
+    monkeypatch.setattr(manager, "submit", submit)
+    response = client.post("/web-assets/run", data={
+        "csrf": csrf(client), "client": "Acme", "action": action})
+    assert response.status_code == status
+    assert "<title>Detection · Web assets · CVEBeacon</title>" in response.text
+    assert 'aria-current="page">Detection' in response.text
+    assert 'aria-current="page">Overview' not in response.text
+    expected = ("another run is in progress" if failure == "run-in-progress"
+                else "The web detection job could not be started")
+    assert expected in response.text
+
+
 def test_detection_companion_argument_list(web, monkeypatch):
     config, _, _, client = web
     assert save(client).status_code == 303
