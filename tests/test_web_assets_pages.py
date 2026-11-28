@@ -350,6 +350,153 @@ def test_select_all_reveal_is_script_ready(web):
     assert "data-bulk-controls" in script
 
 
+def test_product_rows_carry_stable_anchor_targets(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [
+        {"asset_id": "w-nginx", "hostname": "a.example", "vendor": "nginx", "product": "nginx",
+         "name": "nginx", "category": "web-server", "categories": ["web-server"],
+         "confidence": "high", "versions": ["1.25.3"], "evidence_types": ["header"]},
+        {"asset_id": "w-wp", "hostname": "b.example", "vendor": "wordpress", "product": "wordpress",
+         "name": "WordPress", "category": "cms", "categories": ["cms"],
+         "confidence": "low", "versions": [], "evidence_types": ["meta"]},
+        {"hostname": "c.example", "vendor": "example", "product": "widget", "name": "Widget",
+         "category": "framework", "categories": ["framework"], "confidence": "medium",
+         "versions": ["2.0"], "evidence_types": ["header"]},
+    ])
+    site_page = client.get("/web-assets/products?client=Acme").text
+    assert site_page.count('id="product-w-nginx"') == 1
+    assert site_page.count('id="product-w-wp"') == 1
+    assert site_page.count('<tr id="product-') == 2
+    category_page = client.get("/web-assets/products", query_string={
+        "client": "Acme", "view": "category"}).text
+    assert category_page.count('id="product-w-nginx"') == 1
+    assert category_page.count('id="product-w-wp"') == 1
+    assert category_page.count('<tr id="product-') == 2
+
+
+def test_empty_filter_result_keeps_client_wide_add_actions(web):
+    config, users, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [
+        {"asset_id": "web-ready", "hostname": "a.example", "vendor": "nginx", "product": "nginx",
+         "name": "nginx", "category": "web-server", "categories": ["web-server"],
+         "confidence": "high", "versions": ["1.25.3"], "evidence_types": ["header"]},
+        {"asset_id": "web-other", "hostname": "b.example", "vendor": "apache", "product": "apache",
+         "name": "Apache", "category": "web-server", "categories": ["web-server"],
+         "confidence": "medium", "versions": ["2.4.58"], "evidence_types": ["header"]},
+    ])
+    page = client.get("/web-assets/products", query_string={
+        "client": "Acme", "tech": "zzz"}).text
+    assert "No products match these filters" in page
+    assert "Add all 2 ready products" in page
+    assert "Add all High confidence ready products (1)" in page
+    assert "Add all except Low confidence (2)" in page
+    card = page.split('id="detected-products"', 1)[1].split("</main>", 1)[0]
+    assert 'action="/web-assets/inventory/preview"' in card
+    assert 'name="action" value="all"' in card
+    assert 'name="csrf"' in card and not re.search(r'name="csrf" value=""', card)
+    assert 'name="tech" value="zzz"' in card
+
+    grant(users, {"view"})
+    login(client, "reader")
+    readonly = client.get("/web-assets/products", query_string={
+        "client": "Acme", "tech": "zzz"}).text
+    assert "No products match these filters" in readonly
+    assert "Add all 2 ready products" not in readonly
+    assert "Add all High confidence ready products" not in readonly
+
+
+def test_category_view_labels_every_product_cell_with_its_site(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [
+        {"asset_id": "web-alpha-a", "hostname": "a.example", "vendor": "example",
+         "product": "alpha", "name": "Alpha", "category": "framework",
+         "categories": ["framework"], "confidence": "low", "versions": [],
+         "evidence_types": ["header"]},
+        {"asset_id": "web-alpha-b", "hostname": "b.example", "vendor": "example",
+         "product": "alpha", "name": "Alpha", "category": "framework",
+         "categories": ["framework"], "confidence": "low", "versions": [],
+         "evidence_types": ["header"]},
+        {"asset_id": "web-nosite", "vendor": "example", "product": "nohost", "name": "NoHost",
+         "category": "cms", "categories": ["cms"], "confidence": "high",
+         "versions": ["1.0"], "evidence_types": ["meta"]},
+    ])
+    page = client.get("/web-assets/products", query_string={
+        "client": "Acme", "view": "category"}).text
+    rows = {}
+    for asset_id in ("web-alpha-a", "web-alpha-b", "web-nosite"):
+        rows[asset_id] = next(chunk for chunk in page.split("<tr") if f'id="product-{asset_id}"' in chunk)
+    assert '<div class="muted web-product-site">a.example</div>' in rows["web-alpha-a"]
+    assert '<div class="muted web-product-site">b.example</div>' in rows["web-alpha-b"]
+    assert '<div class="muted web-product-site">Site not recorded</div>' in rows["web-nosite"]
+    assert 'aria-label="Select Alpha on a.example"' in rows["web-alpha-a"]
+    assert 'aria-label="Select Alpha on b.example"' in rows["web-alpha-b"]
+    assert 'aria-label="Select NoHost on Site not recorded"' in rows["web-nosite"]
+    assert "Version of Alpha on a.example" in rows["web-alpha-a"]
+    assert "Version of Alpha on b.example" in rows["web-alpha-b"]
+
+
+def test_status_tiles_keep_the_current_view(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [
+        {"asset_id": "web-ready", "hostname": "a.example", "vendor": "nginx", "product": "nginx",
+         "name": "nginx", "category": "web-server", "categories": ["web-server"],
+         "confidence": "high", "versions": ["1.25.3"], "evidence_types": ["header"]},
+    ])
+    page = client.get("/web-assets/products", query_string={
+        "client": "Acme", "view": "tech"}).text
+    tiles = dict((label, href.replace("&amp;", "&")) for href, label in re.findall(
+        r'<a class="stat[^"]*" href="([^"]+)">.*?<span class="stat-label">([^<]+)</span>', page, re.S))
+    for label, status in (("Monitored", "monitored"), ("Ready to add", "ready"),
+                          ("Needs review", "review"), ("Third-party services", "service")):
+        query = parse_qs(urlsplit(tiles[label]).query)
+        assert query["inv"] == [status], label
+        assert query["view"] == ["tech"], label
+    ready = client.get(tiles["Ready to add"])
+    assert ready.status_code == 200
+    assert re.search(r'href="[^"]*view=tech[^"]*"[^>]*aria-current="page">By technology', ready.text)
+    assert "Detected products by technology" in ready.text
+
+
+def test_legacy_product_redirects_keep_first_values_and_notice_text(web):
+    config, _, _, client = web
+    assert save(client).status_code == 303
+    seed_products(config, [
+        {"asset_id": "web-ready", "hostname": "a.example", "vendor": "nginx", "product": "nginx",
+         "name": "nginx", "category": "web-server", "categories": ["web-server"],
+         "confidence": "high", "versions": ["1.25.3"], "evidence_types": ["header"]},
+    ])
+    cases = (
+        ({"view": ["tech", "site"]}, {"view": ["tech"]}),
+        ({"tech": ["nginx", "apache"]}, {"tech": ["nginx"]}),
+        ({"conf": ["high", "low"]}, {"conf": ["high", "low"]}),
+        ({"conf": ["high", "unknown", "low"]}, {"conf": ["high", "low"]}),
+        ({"tech": ""}, {}),
+        ({"conf": "unknown"}, {}),
+        ({"version": "bogus"}, {}),
+        ({"marked": "000001"}, {"marked": ["000001"]}),
+        ({"added": "000002"}, {"added": ["000002"]}),
+    )
+    for query, expected in cases:
+        response = client.get("/web-assets", query_string={"client": "Acme", **query})
+        assert response.status_code == 302, (query, response.text)
+        location = urlsplit(response.headers["Location"])
+        assert location.path == "/web-assets/products", query
+        assert parse_qs(location.query) == {"client": ["Acme"], **expected}, query
+        page = client.get(response.headers["Location"])
+        assert page.status_code == 200 and "Choose a client" not in page.text, query
+
+    marked = client.get("/web-assets", query_string={"client": "Acme", "marked": "000001"})
+    assert "Marked 1 technology as reported." in client.get(marked.headers["Location"]).text
+    repeated = client.get("/web-assets/products", query_string={
+        "client": "Acme", "view": ["tech", "site"]}).text
+    assert "Detected products by technology" in repeated
+
+
+
 def test_products_without_a_client_or_with_a_bad_client(web):
     _, _, _, client = web
     page = client.get("/web-assets/products")
@@ -384,6 +531,22 @@ def test_shared_section_components_are_styled():
     assert "data-bulk-select-all" in script and "data-bulk-clear" in script
     ui_script = (Path(dashboard_web.__file__).parent / "static" / "ui.js").read_text(encoding="utf-8")
     assert 'querySelector(\'[aria-current="page"]\')' in ui_script and "scrollLeft" in ui_script
+
+
+def test_filter_panel_sticks_on_desktop_and_collapses_the_mobile_technology_cards():
+    from cvebeacon import dashboard_web
+    css = (Path(dashboard_web.__file__).parent / "static" / "dashboard.css").read_text(encoding="utf-8")
+    desktop = css.split("@media (min-width: 901px)", 1)[1]
+    assert re.search(
+        r"\.filter-panel\s*\{[^}]*position:\s*sticky;[^}]*top:\s*var\(--topbar-height\);[^}]*z-index:\s*\d+",
+        desktop, re.S)
+    assert ".filter-bar { position: sticky" not in css
+    assert ".filter-panel { position: sticky" not in css.split("@media (min-width: 901px)", 1)[0]
+    mobile = css.split("@media (max-width: 640px)", 1)[1]
+    assert re.search(r"\.web-tech-table-wrap\s*\{\s*display:\s*none;", mobile)
+    assert re.search(r"\.web-tech-groups\s*\{\s*display:\s*grid;", mobile)
+    assert re.search(r"\.web-tech-groups\s*\{\s*display:\s*none;", css)
+
 
 
 def test_web_assets_is_a_separate_sidebar_section(web):

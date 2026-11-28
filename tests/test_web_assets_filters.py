@@ -84,6 +84,9 @@ def test_by_technology_view(web):
     client = seed(web, SAMPLE)
     table = results(client, view="tech")
     assert names(table) == ["Alpha", "Beta", "Delta", "Gamma"]
+    assert table.count("<details class=\"product-group web-tech-group\">") == 4
+    assert 'class="table-wrap web-tech-table-wrap"' in table
+    assert "web-tech-detail" in table
     alpha = table.split("<tr>")[2]
     assert '<td class="num" data-label="Sites">3</td>' in alpha
     assert 'web-version-badge">1.0</span> <span class="muted">x2</span>' in alpha

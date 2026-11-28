@@ -97,7 +97,7 @@ def products_card(text):
 
 
 def row(text, name):
-    return next(chunk for chunk in text.split("<tr>") if f"<strong>{name}</strong>" in chunk)
+    return next(chunk for chunk in text.split("<tr") if f"<strong>{name}</strong>" in chunk)
 
 
 def preview(client, picks=(), versions=None, action="selected", **extra):
