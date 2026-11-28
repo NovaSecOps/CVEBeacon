@@ -1,0 +1,107 @@
+{% extends 'base.html' %}
+{% set nav_active = 'web.changes' %}
+{% block title %}Changes · Web assets · CVEBeacon{% endblock %}
+{% from 'ui.html' import card, callout, empty_state, stat_grid, stat %}
+{% from '_web_assets_chooser.html' import client_chooser with context %}
+{% set section = {'page': 'changes', 'endpoint': 'web.changes', 'description': section_description,
+                  'primary_action': '', 'primary_url': '', 'primary_label': ''} %}
+{% block content %}
+{% include '_web_assets_section.html' %}
+
+{% if not client %}
+{{ client_chooser('web.changes') }}
+{% elif document %}
+<div class="section-block">{% include 'web_inventory_sync.html' %}</div>
+
+{% call card('Changes since the last scan', 'Detection compares the saved products with this client\'s inventory. These are proposals; Auto mode can apply some without asking.') %}
+{% if sync_settings and sync_settings.mode == 'auto' and sync_view and sync_view.state.summary %}
+{% set summary = sync_view.state.summary %}
+{% call callout('info', 'Last automatic inventory changes') %}
+<p>{{ watch_stamp(summary.at) }} · {{ summary.added }} added · {{ summary.updated }} updated · {{ summary.removed }} removed.</p>
+{% endcall %}
+{% endif %}
+{% if sync_view and sync_view.removal_deferred %}
+{% call callout('warning') %}<p>{{ sync_coverage_warning }}</p>{% endcall %}
+{% endif %}
+
+{% if not managed_enabled %}
+{{ empty_state('Inventory sync is unavailable', 'Managed inventories are turned off, so detection cannot propose inventory changes.', url_for('config_editor.inventory'), 'Inventory settings') }}
+{% elif sync_warning %}
+{{ empty_state('Inventory changes could not be read', sync_warning, url_for('web.detection', client=client), 'Open Detection') }}
+{% elif not sync_changes %}
+{% if sync_settings and sync_settings.mode == 'off' %}
+{{ empty_state('Inventory sync is off', 'Missing products are still flagged, but additions and version updates stay manual until Review or Auto is turned on.', url_for('web.changes', client=client, _anchor='sync-settings'), 'Turn on inventory sync') }}
+{% elif not sync_view or not sync_view.evidence %}
+{{ empty_state('No inventory changes yet', sync_waiting, url_for('web.detection', client=client), 'Open Detection') }}
+{% else %}
+{{ empty_state('No inventory changes to review', 'Detection found no additions, version changes or missing products for this client. A complete scan is not proof of what is installed.', url_for('web.detection', client=client), 'Open Detection') }}
+{% endif %}
+{% else %}
+{% call stat_grid() %}
+{{ stat(change_counts['add'], 'New products', 'Proposed additions') }}
+{{ stat(change_counts['update'], 'Version changes', 'Proposed inventory updates') }}
+{{ stat(change_counts['remove'], 'Not detected', 'Proposed removals or keeps') }}
+{% endcall %}
+{% if sync_settings and sync_settings.mode == 'off' %}
+{% call callout('info', 'Inventory sync is off') %}<p>Only missing products can be reviewed. Turn on Review or Auto in the settings above to review additions and version changes.</p>{% endcall %}
+{% endif %}
+{% if sync_view.evidence and not sync_view.evidence.complete %}<p>Detection was incomplete. Automatic updates and removals wait for a complete scan.</p>{% endif %}
+
+{% for group in sync_groups %}
+<details class="product-group web-sync-group"{% if group['open'] %} open{% endif %}>
+<summary><span class="group-title">{{ group['title'] }}</span><span class="group-meta">{{ group['count'] }} change{{ '' if group['count'] == 1 else 's' }}{% if group['page_count'] != group['count'] %} · {{ group['page_count'] }} on this page{% endif %}</span><svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+<div class="group-body">
+{% if group['items'] %}
+<div class="table-wrap" role="region" aria-label="{{ group['title'] }} changes" tabindex="0">
+<table class="table-dense web-sync-table" role="table"><thead role="rowgroup"><tr role="row"><th id="sync-{{ group['kind'] }}-product" class="web-sync-product-cell" scope="col" role="columnheader">Product</th><th id="sync-{{ group['kind'] }}-site" class="web-sync-site-cell" scope="col" role="columnheader">Site</th><th id="sync-{{ group['kind'] }}-change" class="web-sync-change-cell" scope="col" role="columnheader">Change</th>{% if can_add %}<th id="sync-{{ group['kind'] }}-actions" class="web-sync-actions-cell" scope="col" role="columnheader">Actions</th>{% endif %}</tr></thead>
+<tbody role="rowgroup">
+{% for identity, change in group['items'] %}
+<tr role="row">
+<th scope="row" role="rowheader" headers="sync-{{ group['kind'] }}-product" data-label="Product">{{ change.product }}</th>
+<td role="cell" headers="sync-{{ group['kind'] }}-site" data-label="Site">{{ change.site }}</td>
+<td role="cell" headers="sync-{{ group['kind'] }}-change" data-label="Change">{% if change.kind == 'add' %}New · {{ change.new.version }}
+{% elif change.kind == 'update' %}Version changed · {{ change.old.version }} → {{ change.new.version }}
+{% else %}<span class="badge badge-warning">Not detected since {{ change.since.date().isoformat() }}</span> · {{ change.old.version }}
+{% if change.kept %}<div>Kept in inventory.</div>
+{% elif not change.can_remove %}<div>Waiting for two consecutive complete misses and a complete scan.</div>
+{% elif sync_settings.auto_remove %}<div>Pending removal from {{ watch_stamp(change.due.isoformat()) }}.</div>{% endif %}
+{% endif %}</td>
+{% if can_add %}
+<td role="cell" headers="sync-{{ group['kind'] }}-actions" data-label="Actions"><form method="post" action="{{ url_for('web.inventory_sync') }}" class="form-actions">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
+<input type="hidden" name="sync_page" value="{{ sync_page }}">
+<input type="hidden" name="asset_id" value="{{ identity }}"><input type="hidden" name="sync_token" value="{{ change.token }}">
+{% if change.kind == 'add' %}
+<input type="hidden" name="pick" value="{{ identity }}">
+<button type="submit" class="btn btn-secondary btn-small" formaction="{{ url_for('web.inventory_preview') }}" name="action" value="sync-add">Add</button>
+<button type="submit" class="btn btn-secondary btn-small" name="action" value="ignore">Ignore</button>
+{% elif change.kind == 'update' %}
+<button type="submit" class="btn btn-secondary btn-small" name="action" value="update">Update</button>
+<button type="submit" class="btn btn-secondary btn-small" name="action" value="keep-version">Keep</button>
+{% else %}
+{% if change.can_remove %}<button type="submit" class="btn btn-danger btn-small" name="action" value="remove">Remove</button>{% endif %}
+{% if change.kept %}<button type="submit" class="btn btn-secondary btn-small" name="action" value="reconsider">Undo keep</button>
+{% else %}<button type="submit" class="btn btn-secondary btn-small" name="action" value="keep-removal">Keep</button>{% endif %}
+{% endif %}
+</form></td>
+{% endif %}
+</tr>
+{% endfor %}
+</tbody></table>
+</div>
+{% else %}
+<p class="help">No {{ group['title'] | lower }} on this page.</p>
+{% endif %}
+</div>
+</details>
+{% endfor %}
+
+<nav class="pagination" aria-label="Inventory changes pages">
+{% if sync_page > 1 %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.changes', client=client, sync_page=sync_page - 1) }}">Previous</a>{% endif %}
+<span>Page {{ sync_page }} of {{ sync_pages }} · {{ row_limit }} changes per page · {{ sync_total }} change{{ '' if sync_total == 1 else 's' }} waiting</span>
+{% if sync_page < sync_pages %}<a class="btn btn-secondary btn-small" href="{{ url_for('web.changes', client=client, sync_page=sync_page + 1) }}">Next</a>{% endif %}
+</nav>
+{% endif %}
+{% endcall %}
+{% endif %}
+{% endblock %}

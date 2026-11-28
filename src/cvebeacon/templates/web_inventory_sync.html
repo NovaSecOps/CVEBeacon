@@ -1,94 +1,50 @@
-{% from 'ui.html' import card, callout, table_wrap, button %}
-
-{% call card('Inventory sync') %}
+{% from 'ui.html' import card, callout, explain, table_wrap %}
+{#- Inventory sync settings. Included by the Changes page only. -#}
+{% call card('Inventory sync', 'Choose whether detection proposals wait for review or apply automatically.', id='sync-settings') %}
 {% if sync_notice %}{% call callout('success') %}<p>{{ sync_notice }}</p>{% endcall %}{% endif %}
 {% if sync_settings %}
-<p>Current mode: <strong>{{ sync_settings.mode | title }}</strong>{% if sync_settings.mode_override == 'default' %} (global default){% endif %}.</p>
-{% if not managed_enabled %}<p>Inventory sync is unavailable while managed inventories are turned off.</p>
-{% elif can_add %}
+<p><span class="badge badge-info">Mode: {{ sync_settings.mode | title }}{% if sync_settings.mode_override == 'default' %} (global default){% else %} (client override){% endif %}</span> <span class="badge badge-{{ 'warning' if sync_settings.auto_remove else 'neutral' }}">Automatic removal: {{ 'on' if sync_settings.auto_remove else 'off' }}</span></p>
+{% if sync_settings.mode == 'off' %}<p>Rescans flag missing products. Additions and version updates are manual.</p>
+{% elif sync_settings.mode == 'review' %}<p>Detection proposes additions, version changes and removals. Each change waits for a person.</p>
+{% else %}<p>Detection can apply additions and version changes after a complete scan. Removals follow the automatic removal setting.</p>{% endif %}
+{% if managed_enabled %}
+{% if sync_settings.auto_remove %}<p>Automatic removal is on. Missing products can be removed after the grace period.</p>
+{% else %}<p>Automatic removal is off. Missing products stay in the inventory until someone clicks <strong>Remove</strong>.</p>{% endif %}
+{% else %}
+{% call callout('info', 'Inventory sync is unavailable') %}<p>Inventory sync is unavailable while managed inventories are turned off. Turn managed inventories on in <a href="{{ url_for('config_editor.inventory') }}">Inventory settings</a> to sync detection results with this client's inventory.</p>{% endcall %}
+{% endif %}
+{% if managed_enabled and can_add %}
 <form method="post" action="{{ url_for('web.inventory_sync') }}" class="stack">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}"><input type="hidden" name="action" value="mode">
+<div class="field-grid">
 <div class="field"><label for="web-sync-mode">Sync mode for this client</label>
 <select id="web-sync-mode" name="mode">
 {% for value in sync_choices %}<option value="{{ value }}"{% if value == sync_settings.mode_override %} selected{% endif %}>{{ value | title }}</option>{% endfor %}
 </select></div>
-<div class="field"><label for="web-sync-removal">Automatic removal in Auto mode</label>
+<div class="field"><label for="web-sync-removal">Automatic removal</label>
 <select id="web-sync-removal" name="auto_remove">
 {% for value in sync_removal_choices %}<option value="{{ value }}"{% if value == sync_settings.removal_override %} selected{% endif %}>{{ value | title }}</option>{% endfor %}
-</select></div>
-<div class="form-actions">{{ button('Save sync settings', kind='secondary') }}</div>
+</select><p class="help">Applies in Auto mode.</p></div>
+</div>
+<div class="form-actions"><button class="btn btn-secondary" type="submit">Save sync settings</button></div>
 </form>
+{% elif managed_enabled %}
+<p class="muted">You need permission to manage inventories to change sync settings for this client.</p>
 {% endif %}
-{% if managed_enabled %}
-{% if sync_settings.auto_remove %}<p>Automatic removal is on. Missing products can be removed after the grace period.</p>
-{% else %}<p>Automatic removal is off. Missing products stay in the inventory until someone clicks <strong>Remove</strong>.</p>{% endif %}
-{% if sync_settings.mode == 'off' %}<p>Rescans flag missing products. Additions and version updates are manual.</p>{% endif %}
-{% endif %}
+{% call explain('What the modes mean') %}
+{% call table_wrap('Inventory sync modes') %}
+<table class="table-dense"><thead><tr><th scope="col">Setting</th><th scope="col">What it does</th></tr></thead>
+<tbody>
+<tr><th scope="row">Off</th><td>Rescans flag missing products. Additions and version updates are manual.</td></tr>
+<tr><th scope="row">Review</th><td>Detection proposes additions, version updates and removals. Each change waits for a person.</td></tr>
+<tr><th scope="row">Auto</th><td>Additions and version updates apply after a complete detection. Removals follow the automatic removal setting and the grace period.</td></tr>
+<tr><th scope="row">Automatic removal off</th><td>Missing products stay in the inventory until someone clicks <strong>Remove</strong>.</td></tr>
+<tr><th scope="row">Automatic removal on</th><td>Missing products are removed after the grace period when coverage is confirmed.</td></tr>
+</tbody></table>
+{% endcall %}
+{% endcall %}
+{% else %}
+<p>Inventory sync settings could not be read for this client.</p>
 {% endif %}
 {% if sync_warning %}{% call callout('warning', 'Inventory sync unavailable') %}<p>{{ sync_warning }}</p>{% endcall %}{% endif %}
 {% endcall %}
-
-{% if sync_view %}
-{% call card('Changes since the last scan') %}
-{% if sync_settings.mode == 'auto' and sync_view.state.summary %}
-{% set summary = sync_view.state.summary %}
-{% call callout('info', 'Last automatic inventory changes') %}
-<p>{{ watch_stamp(summary.at) }} · {{ summary.added }} added · {{ summary.updated }} updated · {{ summary.removed }} removed.</p>
-{% endcall %}
-{% endif %}
-{% if sync_view.removal_deferred %}
-{% call callout('warning') %}<p>{{ sync_coverage_warning }}</p>{% endcall %}
-{% endif %}
-{% if not sync_view.evidence %}
-<p>{{ sync_waiting }}</p>
-{% elif not sync_view.evidence.complete %}<p>Detection was incomplete. Automatic updates and removals wait for a complete scan.</p>{% endif %}
-{% if sync_changes %}
-{% if sync_pages > 1 %}
-<nav class="form-actions" aria-label="Inventory changes pages">
-{% if sync_page > 1 %}<a href="{{ url_for('web.index', client=client, sync_page=sync_page - 1) }}">Previous</a>{% endif %}
-<span>Page {{ sync_page }} of {{ sync_pages }}</span>
-{% if sync_page < sync_pages %}<a href="{{ url_for('web.index', client=client, sync_page=sync_page + 1) }}">Next</a>{% endif %}
-</nav>
-{% endif %}
-{% call table_wrap('Changes since the last scan') %}
-<table><thead><tr><th scope="col">Product</th><th scope="col">Site</th><th scope="col">Change</th>{% if can_add %}<th scope="col">Actions</th>{% endif %}</tr></thead>
-<tbody>
-{% for identity, change in sync_changes %}
-<tr>
-<th scope="row">{{ change.product }}</th>
-<td>{{ change.site }}</td>
-<td>{% if change.kind == 'add' %}New · {{ change.new.version }}
-{% elif change.kind == 'update' %}Version changed · {{ change.old.version }} → {{ change.new.version }}
-{% else %}<span class="badge badge-warning">Not detected since {{ change.since.date().isoformat() }}</span> · {{ change.old.version }}
-{% if change.kept %}<div>Kept in inventory.</div>
-{% elif not change.can_remove %}<div>Waiting for two consecutive complete misses and a complete scan.</div>
-{% elif sync_settings.auto_remove %}<div>Pending removal from {{ watch_stamp(change.due.isoformat()) }}.</div>{% endif %}
-{% endif %}</td>
-{% if can_add %}
-<td><form method="post" action="{{ url_for('web.inventory_sync') }}" class="form-actions">
-<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="client" value="{{ client }}">
-<input type="hidden" name="sync_page" value="{{ sync_page }}">
-<input type="hidden" name="asset_id" value="{{ identity }}"><input type="hidden" name="sync_token" value="{{ change.token }}">
-{% if change.kind == 'add' %}
-<input type="hidden" name="pick" value="{{ identity }}">
-<button type="submit" class="btn" formaction="{{ url_for('web.inventory_preview') }}" name="action" value="sync-add">Add</button>
-<button type="submit" class="btn btn-secondary" name="action" value="ignore">Ignore</button>
-{% elif change.kind == 'update' %}
-<button type="submit" class="btn" name="action" value="update">Update</button>
-<button type="submit" class="btn btn-secondary" name="action" value="keep-version">Keep</button>
-{% else %}
-{% if change.can_remove %}<button type="submit" class="btn" name="action" value="remove">Remove</button>{% endif %}
-{% if change.kept %}<button type="submit" class="btn btn-secondary" name="action" value="reconsider">Undo keep</button>
-{% else %}<button type="submit" class="btn btn-secondary" name="action" value="keep-removal">Keep</button>{% endif %}
-{% endif %}
-</form></td>
-{% endif %}
-</tr>
-{% endfor %}
-</tbody></table>
-{% endcall %}
-{% elif sync_view.evidence %}
-<p>No inventory changes to review.</p>
-{% endif %}
-{% endcall %}
-{% endif %}

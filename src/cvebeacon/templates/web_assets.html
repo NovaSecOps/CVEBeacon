@@ -13,13 +13,18 @@
 {{ client_chooser() }}
 {% elif document %}
 {% set site_help = (site_summary.soon ~ ' expires within 30 days') if site_summary.soon == 1 else ((site_summary.soon ~ ' expire within 30 days') if site_summary.soon else ((site_summary.expired ~ ' expired') if site_summary.expired == 1 else ((site_summary.expired ~ ' expired') if site_summary.expired else 'No expiries within 30 days'))) %}
+<div class="section-block" id="inventory-sync">
 {% call stat_grid() %}
 {{ stat(site_count, 'Sites', site_help, href=url_for('web.sites', client=client)) }}
 {{ stat(total_products, 'Products', chips['with_version'] ~ ' with a version', href=url_for('web.products', client=client)) }}
 {{ stat(chips['monitored'], 'Covered by scans', chips['ready'] ~ ' ready to add, ' ~ chips['review'] ~ ' need review', href=url_for('web.products', client=client, inv='monitored')) }}
 {{ stat(last_run_short or 'Not run yet', 'Last detection', last_run_help, tone=run_tone or none, href=url_for('web.detection', client=client)) }}
-{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts['add'] ~ ' new, ' ~ change_counts['update'] ~ ' updated, ' ~ change_counts['remove'] ~ ' missing', href=url_for('web.index', client=client, _anchor='inventory-sync')) }}{% endif %}
+{% if show_changes %}{{ stat(tab_counts.changes, 'Open changes', change_counts['add'] ~ ' new, ' ~ change_counts['update'] ~ ' updated, ' ~ change_counts['remove'] ~ ' missing', href=url_for('web.changes', client=client)) }}{% endif %}
 {% endcall %}
+{% if not show_changes and managed_enabled %}
+<p class="summary-line"><a href="{{ url_for('web.changes', client=client, _anchor='sync-settings') }}">Turn on inventory sync</a> to review inventory changes after each detection.</p>
+{% endif %}
+</div>
 
 {% call card('Next steps', 'Per-client work, in the order it matters most.') %}
 {{ task_list(next_steps) }}
@@ -50,6 +55,5 @@
 <a class="btn btn-secondary" href="{{ url_for('tech_report.index', client=client) }}">Technology report</a>
 {% endcall %}
 
-<div class="section-block" id="inventory-sync">{% include 'web_inventory_sync.html' %}</div>
 {% endif %}
 {% endblock %}

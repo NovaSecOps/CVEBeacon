@@ -741,7 +741,7 @@ def create_web_blueprint(config):
                 client = document["client"]
                 try:
                     sync_settings = sync.mode(config, path)
-                    if page == "overview" and status == 200 and config.managed_inventory:
+                    if page in {"overview", "changes"} and status == 200 and config.managed_inventory:
                         sync_view = sync.inspect(config, client)
                 except ConfigurationError as exc:
                     sync_warning = str(exc)
@@ -1015,15 +1015,25 @@ def create_web_blueprint(config):
              if sync_settings.mode == "review" or change.kind == "remove"),
             key=lambda item: (item[1].product.casefold(), item[1].site.casefold(), item[0]),
         )
-        sync_pages = max(1, (len(sync_changes) + _ROW_LIMIT - 1) // _ROW_LIMIT)
-        sync_page = min(_sync_page_number(request.args), sync_pages)
-        sync_start = (sync_page - 1) * _ROW_LIMIT
-        site_count = len(document["assets"]) if document else 0
-        show_changes = bool(document and config.managed_inventory and sync_settings
-                            and sync_settings.mode in {"review", "auto"})
         change_counts = {"add": 0, "update": 0, "remove": 0}
         for _, change in sync_changes:
             change_counts[change.kind] = change_counts.get(change.kind, 0) + 1
+        sync_pages = max(1, (len(sync_changes) + _ROW_LIMIT - 1) // _ROW_LIMIT)
+        sync_page = min(_sync_page_number(request.args), sync_pages)
+        sync_start = (sync_page - 1) * _ROW_LIMIT
+        sync_page_items = sync_changes[sync_start:sync_start + _ROW_LIMIT]
+        sync_groups = []
+        for kind, title in (("add", "New products"), ("update", "Version changes"),
+                            ("remove", "Not detected")):
+            items = [(identity, change) for identity, change in sync_page_items
+                     if change.kind == kind]
+            sync_groups.append({
+                "kind": kind, "title": title, "items": items, "count": change_counts[kind],
+                "page_count": len(items), "open": bool(items),
+            })
+        site_count = len(document["assets"]) if document else 0
+        show_changes = bool(document and config.managed_inventory and sync_settings
+                            and sync_settings.mode in {"review", "auto"})
         run_label, run_badge = _RUN_STATE_LABELS.get((run or {}).get("status"), ("Not run yet", "neutral"))
         last_run_short = _short_date(run.get("started_at")) if run else ""
         last_run_help = (
@@ -1050,7 +1060,7 @@ def create_web_blueprint(config):
             if (page in {"overview", "detection"} and client and document and document["assets"]
                     and g.accounts and "run" in g.permissions and available):
                 section_primary_action = "run"
-            if client and can_manage:
+            if page != "changes" and client and can_manage:
                 section_primary_url = url_for("web.sites", client=client, _anchor="add-asset")
                 section_primary_label = "Add site"
             if section_primary_action:
@@ -1066,6 +1076,10 @@ def create_web_blueprint(config):
             section_description = (
                 "Filter detected products, add them to inventory and record report marks."
                 if client else "Inspect detected products for a client.")
+        elif page == "changes":
+            section_description = (
+                "Configure inventory sync and review the changes detection proposes."
+                if client else "Configure inventory sync and review proposed inventory changes.")
         elif client:
             section_description = (
                 f"{site_count} authorised site{'' if site_count == 1 else 's'}, "
@@ -1107,7 +1121,7 @@ def create_web_blueprint(config):
                         "state": "todo",
                         "title": f"Review {len(sync_changes)} inventory change{'' if len(sync_changes) == 1 else 's'}",
                         "detail": "Detection proposes additions, updates or removals in the inventory.",
-                        "url": url_for("web.index", client=client, _anchor="inventory-sync"),
+                        "url": url_for("web.changes", client=client),
                         "action_label": "Open"})
             if not next_steps:
                 next_steps.append({
@@ -1126,7 +1140,8 @@ def create_web_blueprint(config):
             client and config.managed_inventory
             and (config.inventory_directory / f"{inventory_client_key(client)}.client").is_file())
         template = {"sites": "web_assets_sites.html", "detection": "web_assets_detection.html",
-                    "products": "web_assets_products.html"}.get(page, "web_assets.html")
+                    "products": "web_assets_products.html",
+                    "changes": "web_assets_changes.html"}.get(page, "web_assets.html")
         return render_template(template, clients=sorted(clients, key=str.casefold),
                                inventory_clients=inventory_clients, client=client,
                                document=document, version=version, products=products, reviews=reviews,
@@ -1150,6 +1165,7 @@ def create_web_blueprint(config):
                                ready_total=ready_total, managed_warning=managed_warning,
                                sync_settings=sync_settings, sync_view=sync_view,
                                sync_changes=sync_changes[sync_start:sync_start + _ROW_LIMIT],
+                               sync_groups=sync_groups, sync_total=len(sync_changes),
                                sync_page=sync_page, sync_pages=sync_pages,
                                sync_warning=sync_warning, sync_choices=sync.MODE_CHOICES,
                                sync_coverage_warning=sync.COVERAGE_WARNING,
@@ -1264,7 +1280,11 @@ def create_web_blueprint(config):
             return redirect(url_for("web.sites", client=client, prefill_url=prefill_url,
                                     _anchor="add-asset"), code=302)
         params = _passthrough_query(request.args)
-        if client and not ({"sync_page", "sync_result"} & set(params)):
+        if client and ({"sync_page", "sync_result"} & set(params)):
+            sync_params = {name: params[name] for name in ("sync_page", "sync_result")
+                           if name in params}
+            return redirect(url_for("web.changes", client=client, **sync_params), code=302)
+        if client:
             if set(request.args) & (_PRODUCT_QUERY_KEYS | set(_NOTICE_QUERY_KEYS)):
                 product_params = _legacy_product_params(request.args)
                 for name in _NOTICE_QUERY_KEYS:
@@ -1325,6 +1345,23 @@ def create_web_blueprint(config):
             return render(_canonical_client(config, client_label(label)) if label else "",
                           page="products", added=count("added") or 0,
                           marked=count("marked"), withdrawn=count("withdrawn"))
+        except (ConfigurationError, ValueError):
+            abort(400)
+
+    @blueprint.get("/changes")
+    @requires("view")
+    def changes():
+        label = _text(request.args, "client", limit=256)
+
+        def count(name):
+            value = _text(request.args, name, limit=6)
+            return int(value) if value.isascii() and value.isdecimal() else None
+
+        try:
+            return render(_canonical_client(config, client_label(label)) if label else "",
+                          page="changes", added=count("added") or 0,
+                          sync_notice=_SYNC_MESSAGES.get(
+                              _text(request.args, "sync_result", limit=20)))
         except (ConfigurationError, ValueError):
             abort(400)
 
@@ -1611,7 +1648,7 @@ def create_web_blueprint(config):
             if lock is not None:
                 lock.release()
         sync_page = _sync_page_number(request.form)
-        return redirect(url_for("web.index", client=client, sync_result=action,
+        return redirect(url_for("web.changes", client=client, sync_result=action,
                                 sync_page=sync_page if sync_page > 1 else None), code=303)
 
     @blueprint.post("/inventory/preview")
@@ -1656,7 +1693,7 @@ def create_web_blueprint(config):
                 if _revision(current.previous) != revision or actions.digest([proposal.new]) != digest:
                     raise ConfigurationError(sync.STALE)
                 current.commit({identity: proposal}, "web-sync-add")
-                return redirect(url_for("web.products", client=client, added=1), code=303)
+                return redirect(url_for("web.changes", client=client, added=1), code=303)
             profile, data, assets, rows, _, _, _ = plan(client)
             new_assets = [asset for _, asset in rows]
             if _revision(data) != revision or actions.digest(new_assets) != digest or not new_assets:
