@@ -88,6 +88,15 @@ def _sync_page_number(values):
     return max(1, int(value))
 
 
+def _client_sync_mode(config, client):
+    """The client's effective sync mode, or an empty string when it cannot be read."""
+    try:
+        path, _ = paths(config, client)
+        return sync.mode(config, path).mode
+    except (CVEBeaconError, OSError, ValueError):
+        return ""
+
+
 def _passthrough_query(values):
     """Known legacy query values for a redirect; unknown or malformed values are ignored."""
     result = {}
@@ -1283,7 +1292,8 @@ def create_web_blueprint(config):
         if client and ({"sync_page", "sync_result"} & set(params)):
             sync_params = {name: params[name] for name in ("sync_page", "sync_result")
                            if name in params}
-            return redirect(url_for("web.changes", client=client, **sync_params), code=302)
+            if _client_sync_mode(config, client) != "off":
+                return redirect(url_for("web.changes", client=client, **sync_params), code=302)
         if client:
             if set(request.args) & (_PRODUCT_QUERY_KEYS | set(_NOTICE_QUERY_KEYS)):
                 product_params = _legacy_product_params(request.args)
@@ -1623,6 +1633,7 @@ def create_web_blueprint(config):
         if action not in {"mode", "ignore", "keep-version", "update", "remove", "keep-removal", "reconsider"}:
             abort(400)
         lock = None
+        active_mode = ""
         try:
             lock = inventory_lock(config)
             if action == "mode":
@@ -1636,6 +1647,7 @@ def create_web_blueprint(config):
                 current = sync.session(config, client)
                 if current is None:
                     raise ConfigurationError(sync.STALE)
+                active_mode = current.settings.mode
                 current.decide(_text(request.form, "asset_id", required=True, limit=64),
                                _text(request.form, "sync_token", required=True, limit=64), action)
         except PermissionError:
@@ -1648,6 +1660,9 @@ def create_web_blueprint(config):
             if lock is not None:
                 lock.release()
         sync_page = _sync_page_number(request.form)
+        if action != "mode" and active_mode == "off":
+            return redirect(url_for("web.index", client=client, sync_result=action,
+                                    sync_page=sync_page if sync_page > 1 else None), code=303)
         return redirect(url_for("web.changes", client=client, sync_result=action,
                                 sync_page=sync_page if sync_page > 1 else None), code=303)
 
@@ -1656,6 +1671,7 @@ def create_web_blueprint(config):
     def inventory_preview():
         client = form_client()
         token, lock = "", None
+        sync_page = _sync_page_number(request.form)
         try:
             if request.form.get("action") == "sync-add":
                 lock = inventory_lock(config)
@@ -1675,7 +1691,8 @@ def create_web_blueprint(config):
         return render_template(
             "web_inventory_preview.html", client=client, rows=rows, skipped=skipped, unknown=unknown,
             revision=_revision(data), digest=actions.digest(new_assets),
-            new_inventory=data is None, label=profile["name"], description=description, sync_token=token), 200
+            new_inventory=data is None, label=profile["name"], description=description,
+            sync_token=token, sync_page=sync_page), 200
 
     @blueprint.post("/inventory/save")
     @requires(MANAGE)
@@ -1693,7 +1710,9 @@ def create_web_blueprint(config):
                 if _revision(current.previous) != revision or actions.digest([proposal.new]) != digest:
                     raise ConfigurationError(sync.STALE)
                 current.commit({identity: proposal}, "web-sync-add")
-                return redirect(url_for("web.changes", client=client, added=1), code=303)
+                sync_page = _sync_page_number(request.args)
+                return redirect(url_for("web.changes", client=client, added=1,
+                                        sync_page=sync_page if sync_page > 1 else None), code=303)
             profile, data, assets, rows, _, _, _ = plan(client)
             new_assets = [asset for _, asset in rows]
             if _revision(data) != revision or actions.digest(new_assets) != digest or not new_assets:

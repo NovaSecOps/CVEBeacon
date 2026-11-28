@@ -253,6 +253,9 @@ def test_legacy_product_filter_and_notice_parameters_redirect_to_products(web):
 def test_sync_parameters_redirect_to_changes(web):
     _, _, _, client = web
     assert save(client).status_code == 303
+    assert client.post("/web-assets/inventory/sync", data={
+        "csrf": csrf(client), "client": "Acme", "action": "mode", "mode": "review",
+        "auto_remove": "default"}).status_code == 303
     for query, expected in (
             ({"sync_page": "1"}, {"sync_page": ["1"]}),
             ({"sync_result": "mode"}, {"sync_result": ["mode"]}),
@@ -304,7 +307,7 @@ def test_web_assets_pages_have_no_inline_script_or_style_and_load_bulk_script(we
         assert not re.search(r"(?is)<script\b(?![^>]*\bsrc=)[^>]*>", text)
         assert not re.search(r"(?i)\son[a-z]+\s*=", text)
     overview = client.get("/web-assets?client=Acme").text
-    assert '<script src="/static/web-assets.js" defer></script>' not in overview
+    assert '<script src="/static/web-assets.js" defer></script>' in overview
     products = client.get("/web-assets/products?client=Acme").text
     assert '<script src="/static/web-assets.js" defer></script>' in products
 

@@ -84,6 +84,13 @@ def page(client, **query):
     return response.text
 
 
+def overview(client, **query):
+    """The Overview page keeps the Off-mode missing-product decisions."""
+    response = client.get("/web-assets", query_string={"client": "Acme", **query})
+    assert response.status_code == 200, response.text
+    return response.text
+
+
 def post(client, action, **fields):
     return client.post("/web-assets/inventory/sync", data={
         "csrf": csrf(client), "client": "Acme", "action": action, **fields,
@@ -97,12 +104,16 @@ def setup(env, mode="review", *, auto_remove="default"):
     return config, users, client
 
 
-def selection(text, item):
+def selection_any(text, item):
     identity = item["asset_id"]
     found = re.search(fr'name="asset_id" value="{identity}"><input type="hidden" '
-                      r'name="sync_token" value="([a-f0-9]{64})"', card(text))
+                      r'name="sync_token" value="([a-f0-9]{64})"', text)
     assert found, text
     return {"asset_id": identity, "sync_token": found[1]}
+
+
+def selection(text, item):
+    return selection_any(card(text), item)
 
 
 def audit(users, action, *, actor="admin"):
@@ -167,7 +178,8 @@ def test_off_preserves_inventory_and_override_is_validated(blank):
     run(config, 2, [product("fresh", "2")])
     text = page(client)
     assert "Rescans flag missing products. Additions and version updates are manual." in text
-    assert "New ·" not in card(text)
+    assert "New ·" not in text
+    assert "Changes since the last scan" not in text
     assert managed_rows(config) == [old]
     assert post(client, "mode", mode="invalid").status_code == 409
     assert post(client, "mode", mode="auto", auto_remove="bad").status_code == 409
@@ -175,6 +187,87 @@ def test_off_preserves_inventory_and_override_is_validated(blank):
     assert "(global default)" in page(client)
     assert not sync.mode_path(web_assets.paths(config, "Acme")[0]).exists()
     audit(users, "web_inventory_sync_mode:")
+
+
+def test_off_changes_serves_settings_only_and_overview_keeps_manual_decisions(blank):
+    config, _, client = setup(blank, "off")
+    write_managed(config, [row("missing", "1")])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    changes = page(client, sync_page=2)
+    assert "Inventory sync is off" in changes
+    assert "Save sync settings" in changes
+    assert "Changes since the last scan" not in changes
+    assert "Not detected since" not in changes
+    assert 'name="asset_id"' not in changes
+    landing = overview(client)
+    assert "Turn on inventory sync" in landing
+    assert 'href="/web-assets/changes?client=Acme#sync-settings"' in landing
+    assert "Not detected since" in landing
+    assert 'name="action" value="remove"' in landing
+    assert 'name="action" value="keep-removal"' in landing
+
+
+def test_switching_sync_off_moves_proposals_to_overview(blank):
+    config, _, client = setup(blank)
+    write_managed(config, [row("missing", "1")])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    assert "Not detected since" in page(client)
+    response = post(client, "mode", mode="off")
+    assert response.status_code == 303
+    location = urlsplit(response.headers["Location"])
+    assert location.path == "/web-assets/changes"
+    assert parse_qs(location.query)["sync_result"] == ["mode"]
+    text = client.get(response.headers["Location"]).text
+    assert "Inventory sync setting saved." in text
+    assert "Inventory sync is off" in text
+    assert "Not detected since" not in text
+    landing = overview(client)
+    assert "Not detected since" in landing
+    assert 'name="action" value="remove"' in landing
+
+
+def test_off_manual_remove_keep_and_undo_keep_stay_reachable(blank):
+    config, _, client = setup(blank, "off")
+    missing = row("missing", "1")
+    write_managed(config, [missing])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    landing = overview(client)
+    kept = post(client, "keep-removal", **selection_any(landing, product("missing", "1")))
+    assert kept.status_code == 303
+    location = urlsplit(kept.headers["Location"])
+    assert location.path == "/web-assets"
+    assert parse_qs(location.query) == {"client": ["Acme"], "sync_result": ["keep-removal"]}
+    kept_page = client.get(kept.headers["Location"]).text
+    assert "Kept the product in the inventory." in kept_page
+    assert "Kept in inventory." in kept_page and "Undo keep" in kept_page
+    back = post(client, "reconsider", **selection_any(kept_page, product("missing", "1")))
+    assert back.status_code == 303
+    back_page = client.get(back.headers["Location"]).text
+    assert "The product is eligible for removal again after complete detection." in back_page
+    removed = post(client, "remove", **selection_any(back_page, product("missing", "1")))
+    assert removed.status_code == 303
+    removed_page = client.get(removed.headers["Location"]).text
+    assert "Removed the product from the inventory." in removed_page
+    path = config.inventory_directory / f"{client_key('Acme')}.json"
+    assert not path.exists()
+
+
+def test_off_overview_pages_missing_products_without_redirecting(blank):
+    config, _, client = setup(blank, "off")
+    write_managed(config, [row(f"sample-{index:03}", "1") for index in range(501)])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    response = client.get("/web-assets", query_string={"client": "Acme", "sync_page": "2"})
+    assert response.status_code == 200
+    assert "Page 2 of 2" in response.text
+    assert "sample-500" in response.text
 
 
 def test_review_add_update_remove_ignore_and_keep(blank):
@@ -257,6 +350,29 @@ def test_review_add_update_remove_ignore_and_keep(blank):
     assert "New · 5" in text and "Version changed · 7 → 9" in text
 
 
+def test_sync_add_keeps_the_proposal_page_on_back_and_save(blank):
+    config, _, client = setup(blank)
+    products = [product(f"sample-{index:03}", "1") for index in range(502)]
+    run(config, 1, products)
+    second = page(client, sync_page=2)
+    assert "Page 2 of 2 · 500 changes per page · 502 changes waiting" in second
+    pick = selection(second, products[-1])
+    proposed = client.post("/web-assets/inventory/preview", data={
+        **pick, "pick": pick["asset_id"], "action": "sync-add", "client": "Acme",
+        "csrf": csrf(client), "sync_page": "2",
+    })
+    assert proposed.status_code == 200
+    assert 'href="/web-assets/changes?client=Acme&amp;sync_page=2">Back</a>' in proposed.text
+    assert 'action="/web-assets/inventory/save?sync_page=2"' in proposed.text
+    saved = save_inventory(client, proposed)
+    assert saved.status_code == 303
+    location = urlsplit(saved.headers["Location"])
+    assert location.path == "/web-assets/changes"
+    assert parse_qs(location.query) == {"client": ["Acme"], "added": ["1"], "sync_page": ["2"]}
+    after = client.get(saved.headers["Location"]).text
+    assert "Page 2 of 2 · 500 changes per page · 501 changes waiting" in after
+
+
 def test_auto_applies_additions_and_versions_and_respects_grace_and_keep(blank, monkeypatch):
     config, users, client = setup(blank, "auto", auto_remove="on")
     clock = [NOW]
@@ -312,6 +428,32 @@ def test_partial_failed_duplicate_and_returned_runs_break_the_miss_streak(blank)
         for _ in range(2):
             text = card(page(client))
             assert ("Not detected since" in text) == (number == 4)
+
+
+def test_changes_warn_about_incomplete_evidence_without_proposals(blank):
+    config, _, client = setup(blank)
+    assert save(client, path="/about").status_code == 303
+    run(config, 1, sites={BASE_SITE: True, PATH_SITE: False})
+    text = page(client)
+    warning = "Detection was incomplete. Automatic updates and removals wait for a complete scan."
+    assert warning in text
+    assert "No inventory changes in the checked sites" in text
+    assert text.index(warning) < text.index("No inventory changes in the checked sites")
+    assert "Detection found no additions, version changes or missing products for this client." not in text
+
+
+def test_changes_show_waiting_explanation_above_retained_flags(blank):
+    config, _, client = setup(blank)
+    write_managed(config, [row("missing", "1")])
+    for number in (1, 2):
+        run(config, number)
+        page(client)
+    run(config, 3, started=False)
+    text = page(client)
+    assert "Not detected since" in text
+    assert sync.WAITING in text
+    assert text.index(sync.WAITING) < text.index('<span class="group-title">New products</span>')
+    assert 'href="/web-assets/detection?client=Acme"' in text
 
 
 def test_unfinished_result_keeps_a_flag_visible_but_cannot_remove(blank, monkeypatch):
@@ -415,21 +557,26 @@ def test_missing_products_stay_scanned_by_default_and_manual_remove_works(blank,
     missing = row("missing", "1")
     returned = row("returned", "1")
     write_managed(config, [missing, returned])
+
+    def decisions():
+        return overview(client) if mode == "off" else card(page(client))
+
     run(config, 1)
-    assert "Not detected since" not in card(page(client))
+    assert "Not detected since" not in decisions()
     run(config, 2)
-    assert card(page(client)).count("Not detected since 2026-01-01") == 2
+    assert decisions().count("Not detected since 2026-01-01") == 2
     clock[0] += timedelta(days=365)
     text = page(client)
     assert "Automatic removal is off." in text
     assert "until someone clicks <strong>Remove</strong>" in text
-    assert 'name="action" value="remove">Remove</button>' in card(text)
-    assert "Pending removal from" not in card(text)
+    assert 'name="action" value="remove">Remove</button>' in decisions()
+    assert "Pending removal from" not in decisions()
     assert managed_rows(config) == [missing, returned]
-    assert post(client, "remove", **selection(text, product("missing", "1"))).status_code == 303
+    assert post(client, "remove",
+                **selection_any(decisions(), product("missing", "1"))).status_code == 303
     audit(users, '"mode":"web-sync-remove"')
     run(config, 3, [product("returned", "1")])
-    assert "Not detected since" not in card(page(client))
+    assert "Not detected since" not in decisions()
     assert managed_rows(config) == [returned]
 
 
@@ -444,7 +591,7 @@ def test_automatic_removal_requires_auto_mode(blank, mode):
     run(config, 2)
     sync.inspect(config, "Acme")
     assert managed_rows(config) == [old]
-    assert "Not detected since" in card(page(client))
+    assert "Not detected since" in (overview(client) if mode == "off" else card(page(client)))
 
 
 def test_keep_on_second_proposal_page_survives_deadline(blank, monkeypatch):
@@ -693,8 +840,8 @@ def test_idle_get_displays_flags_while_scan_holds_lock(blank):
     lock = OperationLock(config, "web-detect")
     assert lock.acquire()
     try:
-        text = page(client)
-        assert "Not detected since" in card(text)
+        text = overview(client)
+        assert "Not detected since" in text
         assert "A scan or inventory change is in progress" not in text
     finally:
         lock.release()

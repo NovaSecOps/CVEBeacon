@@ -87,6 +87,15 @@
         if (typeof row.scrollIntoView === "function") row.scrollIntoView({block: "center"});
     }
 
+    // The old inventory-sync bookmark pointed at the Overview summary. Follow
+    // the server-rendered Changes link when the fragment is exactly that
+    // bookmark, so bookmark holders reach the current page.
+    function followInventorySyncBookmark() {
+        if (window.location.hash !== "#inventory-sync") return;
+        var link = document.querySelector("#inventory-sync [data-inventory-sync-link]");
+        if (link) window.location.assign(link.href);
+    }
+
     // Below the desktop breakpoint the filter card starts collapsed unless a
     // filter is active. Without this file it stays open, so the fields remain
     // reachable.
@@ -102,6 +111,10 @@
         setupFilterPanel();
         Array.prototype.forEach.call(document.querySelectorAll("form[data-bulk-form]"), setup);
         revealProductAnchor();
+        followInventorySyncBookmark();
     });
-    window.addEventListener("hashchange", revealProductAnchor);
+    window.addEventListener("hashchange", function () {
+        revealProductAnchor();
+        followInventorySyncBookmark();
+    });
 })();

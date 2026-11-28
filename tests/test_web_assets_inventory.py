@@ -109,7 +109,9 @@ def preview(client, picks=(), versions=None, action="selected", **extra):
 
 def confirmation(response):
     """The hidden fields of the confirmation form, as the browser would send them."""
-    form = response.text.split('action="/web-assets/inventory/save"', 1)[1].split("</form>", 1)[0]
+    match = re.search(r'<form[^>]+action="[^"]*inventory/save[^"]*"[^>]*>(.*?)</form>', response.text, re.S)
+    assert match, "confirmation form is missing"
+    form = match.group(1)
     data = {}
     for name, value in re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', form):
         data.setdefault(name, []).append(html.unescape(value))
@@ -119,7 +121,9 @@ def confirmation(response):
 def save_inventory(client, response, **override):
     data = confirmation(response)
     data.update(override)
-    return client.post("/web-assets/inventory/save", data=data)
+    match = re.search(r'<form[^>]+action="([^"]*inventory/save[^"]*)"', response.text)
+    action = html.unescape(match[1]) if match else "/web-assets/inventory/save"
+    return client.post(action, data=data)
 
 
 def managed_rows(config, client_name="Acme"):

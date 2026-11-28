@@ -17,7 +17,7 @@ from cvebeacon import dashboard_web, web_assets
 from cvebeacon.web_assets import paths
 
 from test_dashboard import setup  # noqa: F401
-from test_dashboard_accounts import accounts  # noqa: F401
+from test_dashboard_accounts import accounts, csrf  # noqa: F401
 from test_dashboard_web import save, web  # noqa: F401
 
 BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "msedge")
@@ -45,8 +45,9 @@ def product(asset_id, hostname, name, category="framework", confidence="high", v
             "evidence_types": ["header"]}
 
 
-def render_page(tmp_path, client, query, harness, fragment=""):
-    response = client.get("/web-assets/products", query_string={"client": "Acme", **query})
+def render_page(tmp_path, client, query, harness, fragment="", *, path="/web-assets/products",
+                name="browser-page.html", harness_name="browser-harness.js", return_path=False):
+    response = client.get(path, query_string={"client": "Acme", **query})
     assert response.status_code == 200, response.text
     static = Path(dashboard_web.__file__).parent / "static"
     text = response.text
@@ -60,12 +61,13 @@ def render_page(tmp_path, client, query, harness, fragment=""):
                   lambda match: "<script defer>\n"
                   + (static / "web-assets.js").read_text(encoding="utf-8")
                   + "\n</script>", text, count=1)
-    harness_path = tmp_path / "browser-harness.js"
+    harness_path = tmp_path / harness_name
     harness_path.write_text(harness, encoding="utf-8", newline="\n")
-    text = text.replace("</body>", '<script src="browser-harness.js"></script></body>', 1)
-    page_path = tmp_path / "browser-page.html"
+    text = text.replace("</body>", '<script src="' + harness_name + '"></script></body>', 1)
+    page_path = tmp_path / name
     page_path.write_text(text, encoding="utf-8", newline="\n")
-    return page_path.as_uri() + fragment
+    url = page_path.as_uri() + fragment
+    return (page_path, url) if return_path else url
 
 
 def dump_dom(url, *, width, height):
@@ -294,3 +296,35 @@ def test_filter_panel_is_sticky_on_desktop_and_static_on_mobile(tmp_path, web):
                              width=380, height=800))
     assert active["open"] is True
     assert active["position"] == "static"
+
+
+def test_legacy_inventory_sync_bookmark_opens_changes(tmp_path, web):
+    _, _, _, client = web
+    assert save(client).status_code == 303
+    assert client.post("/web-assets/inventory/sync", data={
+        "csrf": csrf(client), "client": "Acme", "action": "mode", "mode": "review",
+        "auto_remove": "default",
+    }).status_code == 303
+    changes = client.get("/web-assets/changes", query_string={"client": "Acme"})
+    assert changes.status_code == 200
+    (tmp_path / "changes-target.html").write_text(changes.text, encoding="utf-8", newline="\n")
+
+    page_path, url = render_page(
+        tmp_path, client, {}, "", fragment="#inventory-sync", path="/web-assets",
+        name="overview-page.html", harness_name="overview-harness.js", return_path=True)
+    text = page_path.read_text(encoding="utf-8")
+    assert 'href="/web-assets/changes?client=Acme" data-inventory-sync-link' in text
+    text = re.sub(r'(<a[^>]*data-inventory-sync-link[^>]*>)',
+                  lambda match: re.sub(r'href="[^"]*"', 'href="changes-target.html"', match.group(1)),
+                  text, count=1)
+    page_path.write_text(text, encoding="utf-8", newline="\n")
+    dom = dump_dom(url, width=1400, height=900)
+    assert "Changes since the last scan" in dom
+    assert "Mode: Review (client override)" in dom
+
+    other = render_page(
+        tmp_path, client, {}, "", fragment="#inventory-sync-extra", path="/web-assets",
+        name="overview-other.html", harness_name="overview-other-harness.js")
+    dom = dump_dom(other, width=1400, height=900)
+    assert "Next steps" in dom
+    assert "Changes since the last scan" not in dom
