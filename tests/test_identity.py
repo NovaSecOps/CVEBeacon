@@ -56,6 +56,46 @@ def test_category_grouping_not_identity_and_ecosystems_never_conflated():
     assert Asset("a", "Acme", "Widget", "1").target_key == ("acme", "widget", "1")
 
 
+def test_versionless_identity_paths_are_accepted():
+    for fields in (
+        {"vendor": "php", "product": "php"},
+        {"ecosystem": "npm", "product": "lodash"},
+        {"purl": "pkg:npm/lodash"},
+        {"cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"},
+    ):
+        asset = normalize_asset(Asset("a", **fields))
+        assert asset.version == ""
+        assert asset.product and asset.identity_path in {"product", "purl", "ecosystem", "cpe"}
+    with pytest.raises(ValueError, match="blank required field: product"):
+        normalize_asset(Asset("a", vendor="php"))
+
+
+def test_versionless_rows_load_without_a_version_column(tmp_path):
+    path = tmp_path / "inventory.csv"
+    path.write_text("asset_id,vendor,product\nphp-1,php,php\n", encoding="utf-8")
+    asset = load_inventory(InventoryConfig(path))[0]
+    assert (asset.asset_id, asset.vendor, asset.product, asset.version) == ("php-1", "php", "php", "")
+
+
+def test_versionless_rows_validate_through_every_contract_path():
+    from cvebeacon.inventory import validate_records
+    from cvebeacon.inventory_preview import preview_upload
+    from cvebeacon.managed_inventory import encode_records, read_inventory
+
+    rows = [
+        {"asset_id": "product", "vendor": "php", "product": "php", "client": "Acme"},
+        {"asset_id": "package", "ecosystem": "npm", "product": "lodash", "client": "Acme"},
+        {"asset_id": "purl", "purl": "pkg:npm/lodash", "client": "Acme"},
+        {"asset_id": "cpe", "cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*", "client": "Acme"},
+    ]
+    assert [asset.version for asset in validate_records(rows)] == ["", "", "", ""]
+    managed = read_inventory(encode_records(validate_records(rows)), client="Acme")
+    assert len(managed) == 4 and all(asset.version == "" for asset in managed)
+    preview = preview_upload(b"asset_id,vendor,product\nphp-1,php,php\n", ".csv", "Acme")
+    assert preview.assets[0].version == "" and preview.warnings == 1
+    assert "No version: may be affected; confirm the version to be sure." in preview.validation[0][2]
+
+
 def test_cross_identity_uncertainty(setup):
     asset = normalize_asset(Asset("a", purl="pkg:pypi/widget@1", cpe="cpe:2.3:a:acme:widget:1:*:*:*:*:*:*:*"))
     assert identity_conflict(asset)

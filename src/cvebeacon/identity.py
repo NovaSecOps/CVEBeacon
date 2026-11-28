@@ -140,7 +140,10 @@ def normalize_asset(asset: Asset) -> Asset:
         if not asset.repository or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", asset.commit):
             raise ValueError("commit requires repository and an exact full-length Git hash")
         asset = replace(asset, commit=asset.commit.lower())
-    required = ("vendor", "product", "version") if asset.identity_path == "product" else ("product", "version") if asset.identity_path == "ecosystem" else ()
+    # A version is optional on every identity path. An explicit package or CPE
+    # can still supply it, and the scan treats a missing version as unknown
+    # rather than rejecting the row.
+    required = ("vendor", "product") if asset.identity_path == "product" else ("product",) if asset.identity_path == "ecosystem" else ()
     for name in required:
         if not getattr(asset, name):
             raise ValueError(f"blank required field: {name}")

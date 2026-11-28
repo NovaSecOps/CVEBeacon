@@ -7,6 +7,7 @@ from cvebeacon.config import AppConfig, InventoryConfig, SourceConfig
 from cvebeacon.engine import QueryEngine
 from cvebeacon.errors import SourceError
 from cvebeacon.models import Applicability as A, Asset, Evidence, HealthStatus, Vulnerability
+from cvebeacon.sources.nvd import NVDResult
 
 
 ASSET = Asset("a", "Acme", "Widget", "1.0.0")
@@ -20,7 +21,7 @@ def engine(tmp_path):
     value._resolve_cpe = lambda asset: (CPE, "test identity")
     nvd = Evidence("nvd", "applicability", "test", details={"configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [{"vulnerable": True, "criteria": CPE}]}]}]})
     official = Evidence("cve_list", "cna", "test", details={"affected": [{"vendor": "Acme", "product": "Widget", "versions": [{"version": "1.0.0", "status": "affected"}]}]})
-    value.nvd = SimpleNamespace(vulnerabilities=lambda **kw: [(Vulnerability(ID), nvd)])
+    value.nvd = SimpleNamespace(vulnerabilities=lambda **kw: NVDResult(((Vulnerability(ID), nvd),)))
     value.euvd = SimpleNamespace(search=lambda *a: [(Vulnerability(ID), Evidence("euvd", "enrichment", "test"))])
     value._official_evidence = lambda identifier: (official,)
     value._catalog = lambda name: {}
@@ -48,7 +49,7 @@ def test_each_source_failure_is_visible_and_preserves_useful_findings(tmp_path, 
 
 def test_monitoring_refreshes_rejected_cve_no_longer_in_discovery(tmp_path):
     value = engine(tmp_path)
-    value.nvd.vulnerabilities = lambda **kw: []
+    value.nvd.vulnerabilities = lambda **kw: NVDResult()
     value.euvd.search = lambda *a: []
     value._official_evidence = lambda identifier: (Evidence("cve_list", "cna", "rejected", details={"state": "REJECTED"}),)
     known = {"asset": {"asset_id": "a", "vendor": "Acme", "product": "Widget", "version": "1.0.0"}, "vulnerability": {"cve_id": ID}}

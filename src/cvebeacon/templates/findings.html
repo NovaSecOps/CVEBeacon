@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% from 'macros.html' import status, findings_table %}
-{% from 'ui.html' import page_header, card, callout, empty_state, table_wrap, applicability_badge, button, link_button %}
+{% from 'ui.html' import page_header, card, callout, empty_state, table_wrap, applicability_badge, button, link_button, no_version_badge %}
 {% block title %}Findings · CVEBeacon{% endblock %}
 {% block content %}
 {{ page_header('Findings', 'Findings recorded for your inventory, including retained observations from earlier scans. Open a row for the assessment and any evidence that was recorded.') }}
@@ -29,7 +29,7 @@
 <table>
 <thead><tr><th>Asset</th><th>Coverage</th><th>Reason</th></tr></thead>
 <tbody>{% for row in data.coverage %}<tr>
-<td><a href="{{ url_for('asset', asset_id=row.asset.asset_id) }}">{{ row.asset.asset_id }}</a><br><span class="muted">{{ row.asset.vendor }} · {{ row.asset.product }} · Version {{ row.asset.version or 'unknown' }}</span></td>
+<td><a href="{{ url_for('asset', asset_id=row.asset.asset_id) }}">{{ row.asset.asset_id }}</a><br><span class="muted">{{ row.asset.vendor }} · {{ row.asset.product }} · </span>{% if row.asset.version %}<span class="muted">Version {{ row.asset.version }}</span>{% elif is_commit_only(row.asset) %}<span class="muted">Version unknown</span>{% else %}{{ no_version_badge() }} <span class="muted">may be affected; confirm the version to be sure.</span>{% endif %}</td>
 <td>{{ applicability_badge(row.coverage) }}</td>
 <td>{{ row.reason or 'Unresolved coverage' }}</td>
 </tr>{% endfor %}</tbody>

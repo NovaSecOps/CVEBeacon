@@ -34,6 +34,9 @@
 {#- Applicability states used by findings. -#}
 {% macro applicability_badge(value) %}{% set labels = {'affected': ('danger', 'Affected'), 'needs_review': ('warning', 'Needs review'), 'coverage_unknown': ('warning', 'Coverage unknown'), 'not_affected': ('success', 'Not affected')} %}{% set item = labels.get(value, ('neutral', value or 'Unknown')) %}<span class="badge badge-{{ item[0] }}">{{ item[1] }}</span>{% endmacro %}
 
+{#- Inventory row or finding whose version is unknown; scans cover all versions. -#}
+{% macro no_version_badge() %}<span class="badge badge-warning">No version<span class="visually-hidden">: may be affected; confirm the version to be sure.</span></span>{% endmacro %}
+
 {#- Callout. kind: info, success, warning or danger. Optional bold title; body is the call block. -#}
 {% macro callout(kind='info', title=none) %}
 <div class="callout callout-{{ kind }}" role="{{ 'alert' if kind in ['danger', 'warning'] else 'status' }}"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{ {'info': 'info', 'success': 'check', 'warning': 'alert', 'danger': 'x'}[kind] }}"/></svg><div class="callout-body">{% if title %}<p class="callout-title">{{ title }}</p>{% endif %}{{ caller() }}</div></div>

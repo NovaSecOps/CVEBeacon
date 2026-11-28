@@ -487,7 +487,9 @@ workbook into smaller uploads. You can also paste CSV, JSON or YAML rows up to
 file. **Download a CSV template** provides the expected field names and an
 example row. On the preview, match your column names to fields such as **Asset
 ID**, **Vendor**, **Product** and **Version**. Select **Check column mapping**
-to review row warnings and errors before saving. **Add these assets to the
+to review row warnings and errors before saving. **Version** is optional: a row
+without one is accepted and scanned for every version of the product, and the
+preview marks it **No version**. **Add these assets to the
 current inventory** is selected by default and keeps existing assets while
 adding the new IDs. Choose **Replace this client's inventory** only when the
 file is the full list; assets missing from it are removed.

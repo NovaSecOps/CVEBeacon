@@ -9,7 +9,7 @@ from cvebeacon.http import HttpClient
 from cvebeacon.identity import normalize_asset
 from cvebeacon.models import Asset, Applicability as A
 from cvebeacon.osv_applicability import compare, evaluate_osv, range_state
-from cvebeacon.sources.osv import OSVSource, query_identity
+from cvebeacon.sources.osv import ADVISORY_LIMIT_ERROR, OSVSource, query_identity
 
 
 def record(ecosystem="PyPI", name="example", kind="ECOSYSTEM", events=None, **extra):
@@ -161,3 +161,62 @@ def test_repeated_page_token_is_bounded_failure():
         return httpx.Response(200, json={"results": [{"next_page_token": "same"}]})
     result = OSVSource(transport(handler)).query_many([asset])[asset.target_key]
     assert result.error and len(calls) == 2
+
+
+def advisory_query(pages):
+    posted, fetched = [], []
+
+    def handler(request):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            index = int(body["queries"][0].get("page_token") or 0)
+            posted.append(index)
+            value = {"vulns": [{"id": identifier} for identifier in pages[index]]}
+            if index + 1 < len(pages):
+                value["next_page_token"] = str(index + 1)
+            return httpx.Response(200, json={"results": [value]})
+        identifier = request.url.path.rsplit("/", 1)[-1]
+        fetched.append(identifier)
+        return httpx.Response(200, json={"id": identifier, "modified": "2026-09-20T00:00:00Z"})
+
+    return handler, posted, fetched
+
+
+def page_of_identifiers(start, stop):
+    return [f"TEST-2026-{number:05d}" for number in range(start, stop)]
+
+
+def test_osv_retains_and_fetches_exactly_the_advisory_limit():
+    asset = Asset("a", ecosystem="npm", product="example", version="1")
+    pages = [page_of_identifiers(start, start + 1000) for start in range(0, 5000, 1000)]
+    handler, posted, fetched = advisory_query(pages)
+    result = OSVSource(transport(handler)).query_many([asset])[asset.target_key]
+    assert result.error is None
+    assert len(result.matched_ids) == 5000 and len(result.records) == 5000
+    assert posted == [0, 1, 2, 3, 4]
+    assert len(fetched) == 5000 and len(set(fetched)) == 5000
+
+
+def test_osv_duplicate_on_the_final_page_does_not_exceed_the_limit():
+    asset = Asset("a", ecosystem="npm", product="example", version="1")
+    pages = [page_of_identifiers(start, start + 1000) for start in range(0, 4000, 1000)]
+    pages.append(page_of_identifiers(4000, 5000) + ["TEST-2026-00000"])
+    handler, posted, fetched = advisory_query(pages)
+    result = OSVSource(transport(handler)).query_many([asset])[asset.target_key]
+    assert result.error is None
+    assert len(result.matched_ids) == 5000 and len(result.records) == 5000
+    assert posted == [0, 1, 2, 3, 4]
+    assert len(fetched) == 5000 and len(set(fetched)) == 5000
+
+
+def test_osv_overflow_retains_the_limit_and_fetches_only_retained_ids():
+    asset = Asset("a", ecosystem="npm", product="example", version="1")
+    pages = [page_of_identifiers(start, start + 1000) for start in range(0, 5000, 1000)]
+    pages.append(["TEST-2026-05000"])
+    handler, posted, fetched = advisory_query(pages)
+    result = OSVSource(transport(handler)).query_many([asset])[asset.target_key]
+    assert result.error == ADVISORY_LIMIT_ERROR
+    assert len(result.matched_ids) == 5000 and len(result.records) == 5000
+    assert posted == [0, 1, 2, 3, 4, 5]
+    assert len(fetched) == 5000 and len(set(fetched)) == 5000
+    assert "TEST-2026-05000" not in fetched

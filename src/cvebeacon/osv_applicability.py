@@ -6,7 +6,7 @@ import re
 from univers.nuget import InvalidNuGetVersion
 from univers.versions import DebianVersion, MavenVersion, NugetVersion, RpmVersion
 
-from .applicability import Decision, _compare_versions, known_version
+from .applicability import Decision, VERSION_UNKNOWN_REASON, _compare_versions, known_version
 from .identity import name_key, parse_purl, package_name, PURL_ECOSYSTEMS
 from .models import Applicability as A
 
@@ -151,7 +151,7 @@ def evaluate_osv(asset, record, *, commit_match=False):
     if not matches:
         return Decision(A.COVERAGE_UNKNOWN, "OSV record does not establish this exact ecosystem/package identity")
     if not known_version(asset.version):
-        return Decision(A.NEEDS_REVIEW, "installed package version is unknown or not exact")
+        return Decision(A.NEEDS_REVIEW, VERSION_UNKNOWN_REASON)
     results = []
     for item in matches:
         versions, ranges = item.get("versions", []), item.get("ranges", [])
